@@ -83,6 +83,18 @@ class DashboardBuildTests(Fixture):
         self.assertFalse(issue['verified'])
         self.assertEqual('awaiting_verification', issue['local_status'])
 
+    def test_verification_accepts_a_cancelled_task_only_with_evidence(self):
+        self.put('tasks/p/T1.json', {'id': 'T1', 'status': 'done', 'evidence': ['proof']})
+        self.put('tasks/p/T2.json', {'id': 'T2', 'status': 'cancelled'})
+        issue_record = {'key': 'A-1', 'projects': ['p'], 'task_ids': ['T1', 'T2'], 'local_status': 'verified_done',
+                        'verification': {'status': 'passed'}, 'evidence': ['proof']}
+        self.epic('E', ['A-1'], True, [issue_record])
+        self.assertEqual('awaiting_verification', server.build_dashboard(self.root, MODEL)['issues'][0]['local_status'])
+        self.put('tasks/p/T2.json', {'id': 'T2', 'status': 'cancelled', 'evidence': ['superseded by T1']})
+        issue = server.build_dashboard(self.root, MODEL)['issues'][0]
+        self.assertTrue(issue['verified'])
+        self.assertEqual('verified_done', issue['local_status'])
+
     def test_duplicate_cross_project_issue_dedupes_and_allocates_estimate_equally(self):
         self.epic('E1', ['SHARED-1'], True, [{'key': 'SHARED-1', 'projects': ['a'], 'depends_on': ['EXT-1'],
                                               'codex_estimate_hours': {'low': 2, 'likely': 4, 'high': 6}}])

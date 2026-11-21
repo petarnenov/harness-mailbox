@@ -13,6 +13,7 @@ from dependency_graph import build_graph
 from delivery_process import STAGES, project_delivery
 
 ROOT = Path(__file__).parent
+CLOSED_TASK_STATUSES = ('done', 'cancelled')
 STATUSES = ('pending', 'in_progress', 'blocked', 'awaiting_verification', 'verified_done', 'deferred')
 
 
@@ -231,7 +232,7 @@ def build_dashboard(root, model=None, mode='live'):
                       'epic_key': data.get('epic_key'), 'issue_keys': sorted(set(strings(data.get('issue_key')) + strings(data.get('issue_keys')))),
                       'blockers': strings(data.get('blockers')), 'source': str(path.relative_to(root)),
                       'depends_on': strings(data.get('depends_on')),
-                      'evidenced': data.get('status') == 'done' and evidence(data),
+                      'evidenced': data.get('status') in CLOSED_TASK_STATUSES and evidence(data),
                       'evidence': evidence_refs(data),
                       'updated_at': data.get('updated_at'),
                       'owner': data.get('owner'),
@@ -351,7 +352,7 @@ def build_dashboard(root, model=None, mode='live'):
                                    'missing': missing, 'without_completion_evidence': unevidenced}
         issue['execution_status'] = ('blocked' if counts.get('blocked') else
                                      'in_progress' if counts.get('in_progress') else
-                                     'awaiting_verification' if linked and all(t['status'] == 'done' for t in linked) and not missing else
+                                     'awaiting_verification' if linked and all(t['status'] in CLOSED_TASK_STATUSES for t in linked) and not missing else
                                      'pending')
         if issue['conflict']:
             reason = 'Conflicting issue snapshots require reconciliation.'
