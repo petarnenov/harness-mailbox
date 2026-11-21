@@ -13,6 +13,8 @@ Events and their Jira effect (applied by the orchestrator through its Jira tools
 
 The script never talks to Jira. It keeps a durable queue under jira-sync/pending
 and an audit trail under jira-sync/done, so a failed or skipped update stays visible.
+An applied update also refreshes the issue's `source_status` snapshot in every
+epics/*/issues.json that lists it, because the dashboard reads Jira status from there.
 """
 import argparse
 import json
@@ -51,6 +53,17 @@ def pending(root):
     return sorted(requests, key=lambda r: r['queued_at'])
 
 
+def record_source_status(root, issue, status, synced_at):
+    """Copy an applied Jira status into the local snapshots of every Epic that lists the issue."""
+    for issues_file in sorted((root / 'epics').glob('*/issues.json')):
+        snapshot = json.loads(issues_file.read_text())
+        records = [r for r in snapshot.get('issues', []) if r.get('key', r.get('issue_key')) == issue]
+        for record in records:
+            record.update(source_status=status, source_status_synced_at=synced_at)
+        if records:
+            write_atomic(issues_file, snapshot)
+
+
 def done(root, request_id, outcome, detail):
     if outcome not in ('applied', 'skipped'):
         raise ValueError('Outcome must be applied or skipped')
@@ -61,6 +74,8 @@ def done(root, request_id, outcome, detail):
     request.update(outcome=outcome, detail=detail, completed_at=now())
     write_atomic(root / 'jira-sync' / 'done' / f'{request_id}.json', request)
     source.unlink()
+    if outcome == 'applied':
+        record_source_status(root, request['issue'], request['target_status'], request['completed_at'])
     return request
 
 
