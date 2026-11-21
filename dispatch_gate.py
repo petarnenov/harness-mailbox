@@ -195,6 +195,11 @@ def _raw_dependencies(root):
                         raise ValueError('Malformed ' + field + ' declaration: ' + str(path.relative_to(root)))
 
 
+# Fields that never decide eligibility: linked task lists (bound through the graph), edit times and the
+# Jira status snapshot, which jira_sync.py refreshes and which never counts as local completion.
+UNBOUND_ISSUE_FIELDS = ('task_ids', 'local_task_ids', 'updated_at', 'source_status', 'source_status_synced_at')
+
+
 def _dependency_fingerprint(root, task, project, dashboard, context, prerequisites, snapshot):
     """Bind the task's incoming dependency closure, not unrelated mailbox activity.
 
@@ -241,8 +246,7 @@ def _dependency_fingerprint(root, task, project, dashboard, context, prerequisit
                 # Sibling membership/progress does not authorize this task. The
                 # graph above still binds membership of relevant tasks and the
                 # computed readiness of an issue that IS a prerequisite.
-                selected.append({k: v for k, v in issue.items()
-                                 if k not in ('task_ids', 'local_task_ids', 'updated_at')})
+                selected.append({k: v for k, v in issue.items() if k not in UNBOUND_ISSUE_FIELDS})
         if selected:
             records[str(path.relative_to(root))] = selected
     return _hash(dict(version=SCHEMA_VERSION, task=task, project=project,

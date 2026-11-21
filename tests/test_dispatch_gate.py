@@ -317,6 +317,19 @@ class DispatchGateTests(unittest.TestCase):
         self.assertFalse(self.validate(result)['allowed'])
         self.assertEqual(before, (self.root / self.task_path).read_bytes())
 
+    def test_jira_snapshot_refresh_keeps_receipt_but_issue_dependency_change_stales_it(self):
+        self.epic([{'key': 'A', 'projects': ['p'], 'source_status': 'In Progress'}])
+        result = self.send()
+        self.assertTrue(result['allowed'], result)
+        self.epic([{'key': 'A', 'projects': ['p'], 'source_status': 'Closed',
+                    'source_status_synced_at': '2026-11-22T00:00:00+00:00'}])
+        self.assertTrue(self.validate(result)['allowed'])
+        self.epic([{'key': 'A', 'projects': ['p'], 'source_status': 'Closed',
+                    'source_status_synced_at': '2026-11-22T00:00:00+00:00', 'depends_on': ['B']},
+                   {'key': 'B', 'projects': ['p'], 'local_status': 'verified_done',
+                    'verification': 'passed', 'evidence': ['proof']}])
+        self.assertFalse(self.validate(result)['allowed'])
+
     def test_relevant_graph_or_task_change_invalidates_receipt(self):
         for mutation in ('task', 'graph', 'registry'):
             with self.subTest(mutation=mutation):
