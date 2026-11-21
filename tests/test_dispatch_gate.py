@@ -170,6 +170,20 @@ class DispatchGateTests(unittest.TestCase):
                     [{'from': 'milestone:release', 'to': 'task:' + self.target, 'kind': 'requires'}])
                 self.assertEqual(allowed, self.evaluate()['allowed'])
 
+    def test_execution_task_may_deliver_only_one_sub_task_but_investigation_may_span_several(self):
+        self.epic([{'key': 'A', 'projects': ['p'], 'issue_type': 'Sub-task', 'task_ids': [self.target]},
+                   {'key': 'B', 'projects': ['p'], 'issue_type': 'Sub-task', 'task_ids': [self.target]}])
+        result = self.evaluate()
+        self.assertFalse(result['allowed'], result)
+        self.assertTrue(any('several Sub-tasks (A, B)' in reason for reason in result['reasons']), result)
+        self.update_task(task_kind='intake_baseline')
+        self.assertTrue(self.evaluate()['allowed'])
+
+    def test_execution_task_for_one_sub_task_and_its_story_is_allowed(self):
+        self.epic([{'key': 'A', 'projects': ['p'], 'issue_type': 'Sub-task', 'parent_key': 'S', 'task_ids': [self.target]},
+                   {'key': 'S', 'issue_type': 'Story', 'task_ids': [self.target]}])
+        self.assertTrue(self.evaluate()['allowed'])
+
     def test_target_status_and_explicit_holds_cannot_be_bypassed(self):
         for changes in ({'status': 'blocked'}, {'status': 'done'},
                         {'status': 'pending', 'blockers': ['Weekly quota stop']}):

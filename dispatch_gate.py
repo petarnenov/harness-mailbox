@@ -253,6 +253,22 @@ def _dependency_fingerprint(root, task, project, dashboard, context, prerequisit
                       code={k: v for k, v in snapshot.items() if k.startswith('@code/')}))
 
 
+INVESTIGATION_TASK_KINDS = ('intake_baseline', 'intake_planning', 'baseline', 'evidence', 'investigation')
+
+
+def _delivery_unit_violations(task, dashboard):
+    """One execution task delivers at most one Jira Sub-task, so each Sub-task can be verified and closed
+    after its own merge. Read-only investigation tasks may span several Sub-tasks."""
+    if task.get('task_kind') in INVESTIGATION_TASK_KINDS:
+        return []
+    linked = sorted(issue['key'] for issue in dashboard['issues']
+                    if issue.get('issue_type') == 'Sub-task' and task['id'] in issue.get('task_ids', []))
+    if len(linked) > 1:
+        return ['Execution task is linked to several Sub-tasks (' + ', '.join(linked) +
+                '); create one execution task per Sub-task']
+    return []
+
+
 def _eligible(root, task_path, stabilize=True):
     result = _base('check', root)
     before, fingerprint = _snapshot(root)
@@ -275,6 +291,7 @@ def _eligible(root, task_path, stabilize=True):
     for warning in dashboard['warnings']:
         if not any(fragment in warning for fragment in ('unresolved graph endpoint', 'unresolved issue mapping', 'referenced tasks missing')):
             reasons.append('Authoritative graph warning: ' + warning)
+    reasons.extend(_delivery_unit_violations(task, dashboard))
     nodes = {node['id']: node for node in dashboard['graph']['nodes']}
     target = 'task:' + task['id']
     if target not in nodes:

@@ -40,6 +40,8 @@ Bind G1 to the exact criteria/plan revision and G2 to base SHA, task head SHA an
 
 Every question or gate request must identify the verified integration binding, task/worktree and applicable plan revision or commit, and link the required loop evidence. A thread reply alone is not the durable decision: publish the decision and reply through the mailbox before the worker advances. Keep the affected stage pending until explicit acceptance arrives; continue only independent work already authorized by the accepted scope.
 
+**Delivery unit.** The intake baseline ends at G1. Implementation runs in one execution task per Jira Sub-task, each with its own gated dispatch, PR(s), G2, merge, post-merge verification and Closed transition. The dispatch gate refuses an execution task linked to several Sub-tasks; only investigation tasks may span several.
+
 ## 4. PR, approval and merge
 
 After both gates are accepted, the worker publishes its task branch and creates a PR targeting the recorded integration branch. The user's workflow authorizes this task-branch push and PR creation; it does not authorize direct pushes to the integration branch, force pushes, unrelated publishing or deployment. Record PR URL/number, base/head refs and SHAs and gate decision IDs, then notify the orchestrator.
