@@ -12,7 +12,7 @@ as "depends on GEO-1" create no graph edge, so unmet prerequisites show as zero.
 
 `verified` is refused while any linked local task (listed in the issue's
 `task_ids`/`local_task_ids` or naming the issue in `issue_key`/`issue_keys`) is
-not `done` with evidence or still holds its `.lock` directory. The dashboard
+not `done` or `cancelled` with evidence or still holds its `.lock` directory. The dashboard
 applies the same rule, so recording earlier would show the issue as unfinished.
 """
 import argparse
@@ -54,6 +54,10 @@ def set_verified(issue, evidence, verifier, now):
     issue['updated_at'] = now
 
 
+# A cancelled task is closed too, when its evidence records the decision that cancelled it.
+CLOSED_STATUSES = ('done', 'cancelled')
+
+
 def as_list(value):
     if isinstance(value, str):
         return [value]
@@ -82,10 +86,11 @@ def unfinished_linked_tasks(root, issue):
             problems.append(f'{task_id}: task record missing')
             continue
         path, task = tasks[task_id]
-        if task.get('status') != 'done':
-            problems.append(f'{task_id}: status {task.get("status")!r}, expected done')
+        status = task.get('status')
+        if status not in CLOSED_STATUSES:
+            problems.append(f'{task_id}: status {status!r}, expected one of {", ".join(CLOSED_STATUSES)}')
         elif not has_evidence(task):
-            problems.append(f'{task_id}: done without evidence')
+            problems.append(f'{task_id}: {status} without evidence')
         if path.with_suffix('.lock').exists():
             problems.append(f'{task_id}: lock still held')
     return problems

@@ -72,6 +72,14 @@ class RecordIssueTest(unittest.TestCase):
         self.run_command('--issue', 'GEO-2', 'verified', '--evidence', 'r1')
         self.assertEqual(self.issue('GEO-2')['local_status'], 'verified_done')
 
+    def test_verified_accepts_a_cancelled_task_only_with_evidence(self):
+        self.write_task('t-bare-cancel', issue_key='GEO-2', status='cancelled')
+        with self.assertRaisesRegex(ValueError, 't-bare-cancel: cancelled without evidence'):
+            self.run_command('--issue', 'GEO-2', 'verified', '--evidence', 'r1')
+        self.write_task('t-bare-cancel', issue_key='GEO-2', status='cancelled', evidence=['user decision d1'])
+        self.run_command('--issue', 'GEO-2', 'verified', '--evidence', 'r1')
+        self.assertEqual(self.issue('GEO-2')['local_status'], 'verified_done')
+
     def test_rejects_unknown_issue_self_dependency_and_empty_evidence(self):
         with self.assertRaises(ValueError):
             self.run_command('--issue', 'GEO-9', 'depends-on', 'GEO-2')
