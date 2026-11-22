@@ -119,7 +119,7 @@ The current user policy is **no Jira writes**. Read Epic details, issue descript
 - Run `jira_sync.py pending` on activation and resume and finish any queued requests.
 - Delegated workers and their loops stay fully read-only; keep that restriction in every assignment.
 
-**Worklog exception (user, 2026-11-22).** After an issue's `verified` update is recorded as `applied`, queue `jira_sync.py queue --issue <KEY> --event worklog`. The script measures machine hours from the cycle's applied `start` to that `verified`, rounded up to the whole hour. Apply the request as one Jira worklog with its `time_spent` and `started` and no comment, then record the outcome with `jira_sync.py done`.
+**Worklog exception (user, 2026-11-22).** After an issue's `verified` update is recorded as `applied`, queue `jira_sync.py queue --issue <KEY> --event worklog`. The script measures the hours from the cycle's applied `start` to that `verified`, minus the periods in which the issue's agents waited for an answer (`agent_waits.py`), rounded up to the whole hour. Apply the request as one Jira worklog with its `time_spent` and `started` and no comment, then record the outcome with `jira_sync.py done`.
 
 - If the cycle's `start` was recorded as `skipped` because the issue was already In Progress, read the time of that transition from the Jira history and add `--in-progress-at <ISO time with offset>`. Use it only then; the script refuses it beside an applied `start`.
 - A reopened issue gets one worklog per In Progress → Closed cycle; the script refuses a second request for the same Closed.

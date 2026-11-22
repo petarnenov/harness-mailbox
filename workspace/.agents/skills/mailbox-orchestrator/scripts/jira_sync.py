@@ -11,7 +11,7 @@ Events and their Jira effect (applied by the orchestrator through its Jira tools
   start     assign to the user running the orchestrator, move to In Progress
   pr        move to Development Peer Review (only work types that have it)
   verified  move to Closed
-  worklog   log the machine hours from In Progress to Closed as one worklog
+  worklog   log the agents' active hours from In Progress to Closed as one worklog
 
 The script never talks to Jira. It keeps a durable queue under jira-sync/pending
 and an audit trail under jira-sync/done, so a failed or skipped update stays visible.
@@ -19,7 +19,8 @@ An applied update also refreshes the issue's `source_status` snapshot in every
 epics/*/issues.json that lists it, because the dashboard reads Jira status from there.
 
 A worklog covers one cycle: from the issue's applied `start` to its latest applied
-`verified`, in whole hours rounded up. A reopened issue gets one worklog per cycle.
+`verified`, minus the time its agents waited for an answer (see agent_waits.py), in whole
+hours rounded up. A reopened issue gets one worklog per cycle.
 When the cycle's `start` was skipped because Jira was already In Progress, the time of
 that transition from the Jira history must be passed with --in-progress-at. The request
 is refused for a cycle that already has a pending or applied worklog, and for an issue
@@ -34,6 +35,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Optional
+
+import agent_waits
 
 TARGET_STATUS = {'start': 'In Progress', 'pr': 'Development Peer Review', 'verified': 'Closed'}
 WORKLOG = 'worklog'
@@ -114,9 +117,17 @@ def in_progress_moment(root, issue, cycle, jira_in_progress_at):
     return jira_in_progress_at, 'jira history'
 
 
-def machine_hours(in_progress_at, closed_at):
-    elapsed = (closed_at - in_progress_at).total_seconds()
-    return max(1, math.ceil(elapsed / SECONDS_PER_HOUR))
+def issue_task_ids(root, issue):
+    task_ids = set()
+    for issues_file in (root / 'epics').glob('*/issues.json'):
+        for record in json.loads(issues_file.read_text()).get('issues', []):
+            if record.get('key') == issue:
+                task_ids.update(record.get('task_ids') or [])
+    return task_ids
+
+
+def whole_hours(seconds):
+    return max(1, math.ceil(seconds / SECONDS_PER_HOUR))
 
 
 def transition_effect(event):
@@ -130,7 +141,11 @@ def worklog_effect(root, issue, jira_in_progress_at):
     if has_worklog(root, issue, cycle):
         raise ValueError(f'{issue} already has a pending or applied worklog for this Closed')
     in_progress_at, source = in_progress_moment(root, issue, cycle, jira_in_progress_at)
-    return {'time_spent': f'{machine_hours(in_progress_at, cycle.closed_at)}h',
+    elapsed = (cycle.closed_at - in_progress_at).total_seconds()
+    periods = agent_waits.waiting_periods(root, issue_task_ids(root, issue))
+    waited = agent_waits.waited_seconds(periods, in_progress_at, cycle.closed_at)
+    return {'time_spent': f'{whole_hours(elapsed - waited)}h',
+            'elapsed_seconds': round(elapsed), 'waited_seconds': round(waited),
             'started': in_progress_at.strftime(JIRA_STARTED_FORMAT),
             'in_progress_at': in_progress_at.isoformat(), 'in_progress_source': source,
             'closed_at': cycle.closed_at.isoformat()}

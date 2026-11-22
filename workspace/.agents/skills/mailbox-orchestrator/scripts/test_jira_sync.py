@@ -90,6 +90,18 @@ class JiraSyncTest(unittest.TestCase):
         self.assertEqual('2h', jira_sync.queue(self.root, 'GEO-1', 'worklog')['time_spent'])
         self.assertEqual('1h', jira_sync.queue(self.root, 'GEO-2', 'worklog')['time_spent'])
 
+    def test_worklog_leaves_out_the_time_its_agents_waited_for_an_answer(self):
+        self.write_issues('E-1', {'key': 'GEO-1', 'task_ids': ['t-1']})
+        for folder, kind, moment in (('outbox/proj', 'g1_request', '2026-11-22T11:00:00+00:00'),
+                                     ('inbox/proj', 'g1_acceptance', '2026-11-22T14:30:00+00:00')):
+            path = self.root / folder / f'{kind}.json'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({'id': kind, 'type': kind, 'task_id': 't-1', 'created_at': moment}))
+        self.worked('GEO-1', '2026-11-22T10:00:00+00:00', '2026-11-22T16:00:00+00:00')
+        worklog = jira_sync.queue(self.root, 'GEO-1', 'worklog')
+        self.assertEqual('3h', worklog['time_spent'])
+        self.assertEqual((6 * 3600, 3.5 * 3600), (worklog['elapsed_seconds'], worklog['waited_seconds']))
+
     def test_reopened_issue_gets_one_worklog_per_cycle(self):
         self.worked('GEO-1', '2026-11-22T10:00:00+00:00', '2026-11-22T11:00:00+00:00')
         first = jira_sync.queue(self.root, 'GEO-1', 'worklog')
