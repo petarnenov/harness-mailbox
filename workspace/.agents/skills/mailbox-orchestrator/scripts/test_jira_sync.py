@@ -1,15 +1,23 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+import agent_activity
 import jira_sync
+
+MINUTE = timedelta(minutes=1)
 
 
 class JiraSyncTest(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
+        self.transcripts = self.root / 'transcripts'
+        patcher = mock.patch.object(jira_sync, 'TRANSCRIPTS', self.transcripts)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_start_assigns_and_targets_in_progress(self):
         request = jira_sync.queue(self.root, 'GEO-1', 'start')
@@ -72,7 +80,39 @@ class JiraSyncTest(unittest.TestCase):
             request = jira_sync.queue(self.root, issue, event)
             return jira_sync.done(self.root, request['id'], outcome, 'recorded by test')
 
-    def worked(self, issue, in_progress_at, closed_at):
+    def link(self, issue, project=None):
+        """Give the issue a task in its own project (or the named one) with a registered directory."""
+        project = project or f'p-{issue}'
+        task = self.root / 'tasks' / project / f't-{issue}.json'
+        task.parent.mkdir(parents=True, exist_ok=True)
+        task.write_text('{}')
+        self.write_issues(f'E-{issue}', {'key': issue, 'task_ids': [f't-{issue}']})
+        registry = self.root / 'projects.json'
+        projects = json.loads(registry.read_text())['projects'] if registry.exists() else []
+        if not any(entry['id'] == project for entry in projects):
+            projects.append({'id': project, 'working_directory': f'/work/{project}'})
+        registry.write_text(json.dumps({'projects': projects}))
+        return project
+
+    def talk(self, project, *moments, session='s'):
+        """Write a transcript of plain messages at the given ISO moments."""
+        folder = agent_activity.transcript_folder(self.transcripts, f'/work/{project}')
+        folder.mkdir(parents=True, exist_ok=True)
+        with open(folder / f'{session}.jsonl', 'a') as transcript:
+            for moment in moments:
+                transcript.write(json.dumps({'type': 'assistant', 'timestamp': moment, 'message': {}}) + '\n')
+
+    def busy(self, project, opened, closed):
+        """A message every minute from opened to closed, closed included."""
+        moment, end = datetime.fromisoformat(opened), datetime.fromisoformat(closed)
+        moments = []
+        while moment < end:
+            moments.append(moment.isoformat())
+            moment += MINUTE
+        self.talk(project, *moments, end.isoformat())
+
+    def worked(self, issue, in_progress_at, closed_at, project=None):
+        self.busy(self.link(issue, project), in_progress_at, closed_at)
         self.apply(issue, 'start', in_progress_at)
         self.apply(issue, 'verified', closed_at)
 
@@ -84,23 +124,37 @@ class JiraSyncTest(unittest.TestCase):
         self.assertEqual('2026-11-22T12:00:01+00:00', worklog['closed_at'])
         self.assertEqual('applied start', worklog['in_progress_source'])
 
-    def test_worklog_keeps_exact_hours_and_never_logs_less_than_one(self):
+    def test_worklog_keeps_exact_hours_and_rounds_minutes_up_to_one(self):
         self.worked('GEO-1', '2026-11-22T10:00:00+00:00', '2026-11-22T12:00:00+00:00')
         self.worked('GEO-2', '2026-11-22T05:26:00+00:00', '2026-11-22T05:30:00+00:00')
         self.assertEqual('2h', jira_sync.queue(self.root, 'GEO-1', 'worklog')['time_spent'])
         self.assertEqual('1h', jira_sync.queue(self.root, 'GEO-2', 'worklog')['time_spent'])
 
-    def test_worklog_leaves_out_the_time_its_agents_waited_for_an_answer(self):
-        self.write_issues('E-1', {'key': 'GEO-1', 'task_ids': ['t-1']})
-        for folder, kind, moment in (('outbox/proj', 'g1_request', '2026-11-22T11:00:00+00:00'),
-                                     ('inbox/proj', 'g1_acceptance', '2026-11-22T14:30:00+00:00')):
-            path = self.root / folder / f'{kind}.json'
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({'id': kind, 'type': kind, 'task_id': 't-1', 'created_at': moment}))
-        self.worked('GEO-1', '2026-11-22T10:00:00+00:00', '2026-11-22T16:00:00+00:00')
+    def test_worklog_counts_only_the_time_its_agents_worked(self):
+        project = self.link('GEO-1')
+        self.talk(project, '2026-11-22T10:00:00+00:00', '2026-11-22T10:04:00+00:00',
+                  '2026-11-22T13:00:00+00:00', '2026-11-22T13:03:00+00:00')
+        self.apply('GEO-1', 'start', '2026-11-22T10:00:00+00:00')
+        self.apply('GEO-1', 'verified', '2026-11-22T16:00:00+00:00')
         worklog = jira_sync.queue(self.root, 'GEO-1', 'worklog')
-        self.assertEqual('3h', worklog['time_spent'])
-        self.assertEqual((6 * 3600, 3.5 * 3600), (worklog['elapsed_seconds'], worklog['waited_seconds']))
+        self.assertEqual('1h', worklog['time_spent'])
+        self.assertEqual((6 * 3600, 7 * 60), (worklog['elapsed_seconds'], worklog['worked_seconds']))
+
+    def test_issues_of_one_project_open_at_the_same_time_share_its_work(self):
+        self.worked('GEO-1', '2026-11-22T10:00:00+00:00', '2026-11-22T14:00:00+00:00', project='shared')
+        self.worked('GEO-2', '2026-11-22T12:00:00+00:00', '2026-11-22T14:00:00+00:00', project='shared')
+        first = jira_sync.queue(self.root, 'GEO-1', 'worklog')
+        second = jira_sync.queue(self.root, 'GEO-2', 'worklog')
+        self.assertEqual((3 * 3600, 3600), (first['worked_seconds'], second['worked_seconds']))
+
+    def test_worklog_is_refused_without_a_linked_task_or_any_recorded_work(self):
+        self.apply('GEO-1', 'start', '2026-11-22T10:00:00+00:00')
+        self.apply('GEO-1', 'verified', '2026-11-22T12:00:00+00:00')
+        with self.assertRaisesRegex(ValueError, 'no linked task'):
+            jira_sync.queue(self.root, 'GEO-1', 'worklog')
+        self.link('GEO-1')
+        with self.assertRaisesRegex(ValueError, 'no recorded agent work'):
+            jira_sync.queue(self.root, 'GEO-1', 'worklog')
 
     def test_reopened_issue_gets_one_worklog_per_cycle(self):
         self.worked('GEO-1', '2026-11-22T10:00:00+00:00', '2026-11-22T11:00:00+00:00')
@@ -119,6 +173,7 @@ class JiraSyncTest(unittest.TestCase):
                 jira_sync.queue(self.root, issue, 'worklog')
 
     def skipped_start(self, issue, closed_at):
+        self.busy(self.link(issue), '2026-11-22T08:30:00+00:00', closed_at)
         self.apply(issue, 'start', '2026-11-22T10:00:00+00:00', outcome='skipped')
         self.apply(issue, 'verified', closed_at)
 
