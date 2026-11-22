@@ -155,11 +155,28 @@ class JiraSyncTest(unittest.TestCase):
         self.apply('GEO-1', 'verified', '2026-11-22T14:00:00+00:00')
         self.assertEqual(4 * 3600, jira_sync.queue(self.root, 'GEO-2', 'worklog')['worked_seconds'])
 
-    def test_issue_that_was_never_closed_takes_no_share(self):
+    def test_abandoned_issue_takes_no_share(self):
         self.link('GEO-9', project='shared')
-        self.apply('GEO-9', 'start', '2026-11-22T08:00:00+00:00')
+        self.apply('GEO-9', 'start', '2026-11-19T09:59:00+00:00')
         self.worked('GEO-2', '2026-11-22T10:00:00+00:00', '2026-11-22T14:00:00+00:00', project='shared')
         self.assertEqual(4 * 3600, jira_sync.queue(self.root, 'GEO-2', 'worklog')['worked_seconds'])
+
+    def test_issue_whose_task_changed_lately_is_not_abandoned(self):
+        self.link('GEO-9', project='shared')
+        self.apply('GEO-9', 'start', '2026-11-10T08:00:00+00:00')
+        task = self.root / 'tasks' / 'shared' / 't-GEO-9.json'
+        task.write_text(json.dumps({'updated_at': '2026-11-21T09:00:00+00:00'}))
+        self.worked('GEO-2', '2026-11-22T10:00:00+00:00', '2026-11-22T14:00:00+00:00', project='shared')
+        self.assertEqual(2 * 3600, jira_sync.queue(self.root, 'GEO-2', 'worklog')['worked_seconds'])
+
+    def test_issues_worked_at_the_same_time_log_exactly_the_time_worked(self):
+        self.worked('GEO-1', '2026-11-22T10:00:00+00:00', '2026-11-22T14:00:00+00:00', project='shared')
+        self.busy(self.link('GEO-2', project='shared'), '2026-11-22T14:00:00+00:00', '2026-11-22T16:00:00+00:00')
+        self.apply('GEO-2', 'start', '2026-11-22T12:00:00+00:00')
+        first = jira_sync.queue(self.root, 'GEO-1', 'worklog')
+        self.apply('GEO-2', 'verified', '2026-11-22T16:00:00+00:00')
+        second = jira_sync.queue(self.root, 'GEO-2', 'worklog')
+        self.assertEqual((3 * 3600, 3 * 3600), (first['worked_seconds'], second['worked_seconds']))
 
     def test_linked_tasks_are_read_through_the_issue_key_and_local_task_ids_aliases(self):
         self.worked('GEO-1', '2026-11-22T10:00:00+00:00', '2026-11-22T12:00:00+00:00')

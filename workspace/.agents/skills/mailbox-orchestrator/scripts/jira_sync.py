@@ -37,7 +37,7 @@ import math
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -49,6 +49,7 @@ EVENTS = (*TARGET_STATUS, WORKLOG)
 SECONDS_PER_HOUR = 3600
 JIRA_STARTED_FORMAT = '%Y-%m-%dT%H:%M:%S.000%z'
 TRANSCRIPTS = Path.home() / '.claude' / 'projects'
+ABANDONED_AFTER = timedelta(days=3)
 
 
 def now():
@@ -132,11 +133,22 @@ def task_ids_by_issue(root):
     return task_ids
 
 
-def work_windows(root, issue):
-    """(opened, closed) POSIX times of each closed stay in progress, one per cycle.
+def last_sign_of_life(root, issue, task_ids):
+    """POSIX time of the issue's latest Jira update or change to one of its tasks."""
+    requests = [r for state in ('pending', 'done') for r in read_requests(root, state) if r['issue'] == issue]
+    signs = [datetime.fromisoformat(r.get('completed_at', r['queued_at'])).timestamp() for r in requests]
+    for task_id in task_ids:
+        for path in root.glob(f'tasks/*/{task_id}.json'):
+            signs.append(agent_activity.parse_time((agent_activity.read_json(path) or {}).get('updated_at')))
+    return max(sign for sign in signs if sign is not None)
 
-    A stay without a Closed is left out: an abandoned issue would otherwise take a share
-    of every later issue of its project.
+
+def work_windows(root, issue, task_ids):
+    """(opened, closed) POSIX times of each stay in progress, one per cycle.
+
+    The stay that is still in progress lasts ABANDONED_AFTER beyond the issue's last sign of
+    life. While it shows life it shares its project's work with the issues open beside it;
+    once abandoned it no longer takes a share of every later issue.
     """
     starts = sorted(completion_times(root, issue, 'start', 'applied') + completion_times(root, issue, 'start', 'skipped'))
     windows, previous_closed = [], None
@@ -146,11 +158,15 @@ def work_windows(root, issue):
         if opened:
             windows.append((opened.timestamp(), closed.timestamp()))
         previous_closed = closed
+    still_open = next((moment for moment in starts if previous_closed is None or moment > previous_closed), None)
+    if still_open:
+        alive_until = last_sign_of_life(root, issue, task_ids) + ABANDONED_AFTER.total_seconds()
+        windows.append((still_open.timestamp(), alive_until))
     return windows
 
 
 def project_windows(root, issue, own_window):
-    """For each project: this issue's cycle as own_window, plus the closed windows of its other issues.
+    """For each project: this issue's cycle as own_window, plus the work windows of its other issues.
 
     A parent issue shares nothing: it is open as long as its children and gets no worklog of its own.
     """
@@ -161,7 +177,7 @@ def project_windows(root, issue, own_window):
         windows = [own_window]
         for other, other_tasks in task_ids.items():
             if project in agent_activity.task_projects(root, other_tasks):
-                windows += work_windows(root, other)
+                windows += work_windows(root, other, other_tasks)
         return windows
     return windows_of
 
