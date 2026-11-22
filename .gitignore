@@ -30,6 +30,10 @@ htmlcov/
 /archive/
 /discovery/
 /dispatch-gates/
+/decisions/
+/deliveries/
+/jira-sync/
+/reports/
 /AGENTS.md
 
 # Make workflow coverage artifacts
