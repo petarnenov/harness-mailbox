@@ -166,6 +166,21 @@ class JiraSyncTest(unittest.TestCase):
         self.write_issues('E-GEO-1', {'issue_key': 'GEO-1', 'local_task_ids': ['t-GEO-1']})
         self.assertEqual('2h', jira_sync.queue(self.root, 'GEO-1', 'worklog')['time_spent'])
 
+    def test_issue_with_two_starts_in_one_cycle_takes_a_single_share(self):
+        self.worked('GEO-1', '2026-11-22T10:00:00+00:00', '2026-11-22T14:00:00+00:00', project='shared')
+        self.apply('GEO-1', 'start', '2026-11-22T11:00:00+00:00', outcome='skipped')
+        self.worked('GEO-2', '2026-11-22T10:00:00+00:00', '2026-11-22T14:00:00+00:00', project='shared')
+        self.assertEqual(2 * 3600, jira_sync.queue(self.root, 'GEO-2', 'worklog')['worked_seconds'])
+
+    def test_worklog_is_refused_naming_a_project_without_recorded_work(self):
+        self.worked('GEO-1', '2026-11-22T10:00:00+00:00', '2026-11-22T12:00:00+00:00')
+        other_task = self.root / 'tasks' / 'codex-project' / 't-other.json'
+        other_task.parent.mkdir(parents=True)
+        other_task.write_text('{}')
+        self.write_issues('E-GEO-1', {'key': 'GEO-1', 'task_ids': ['t-GEO-1', 't-other']})
+        with self.assertRaisesRegex(ValueError, 'no recorded agent work .* in: codex-project$'):
+            jira_sync.queue(self.root, 'GEO-1', 'worklog')
+
     def test_worklog_is_refused_without_a_linked_task_or_any_recorded_work(self):
         self.apply('GEO-1', 'start', '2026-11-22T10:00:00+00:00')
         self.apply('GEO-1', 'verified', '2026-11-22T12:00:00+00:00')

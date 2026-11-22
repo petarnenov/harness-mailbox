@@ -4,7 +4,8 @@ A Claude Code session writes one JSON line per message, with its timestamp, unde
 ~/.claude/projects/<working directory with every non-alphanumeric character as '-'>/, and its
 subagents under <session>/subagents/. The agent is working between two consecutive messages
 when they are at most IDLE_LIMIT apart, or when the first one started a tool (a build or a test
-run) and the next one followed within TOOL_LIMIT. Any longer gap is waiting: for an answer,
+run) and the next one followed within TOOL_LIMIT. A tool that only asks the user (WAITING_TOOLS)
+is not a running tool. A permission prompt or a sleep cannot be told from one and counts as it. Any longer gap is waiting: for an answer,
 a merge, or the next message. The sessions and subagents of a project are merged, so parallel
 work counts once. When several issues of the same project are open at the same moment, that
 moment is shared equally between them.
@@ -18,6 +19,7 @@ from pathlib import Path
 
 IDLE_LIMIT = 5 * 60
 TOOL_LIMIT = 60 * 60
+WAITING_TOOLS = ('AskUserQuestion', 'ExitPlanMode')
 CONVERSATION = ('user', 'assistant')
 
 
@@ -36,14 +38,17 @@ def read_json(path):
         return None
 
 
-def starts_tool(entry):
+def runs_tool(entry):
+    """True when the message started tools and none of them only waits for the user."""
     content = (entry.get('message') or {}).get('content')
-    return entry.get('type') == 'assistant' and isinstance(content, list) and any(
-        isinstance(part, dict) and part.get('type') == 'tool_use' for part in content)
+    if entry.get('type') != 'assistant' or not isinstance(content, list):
+        return False
+    tools = [part.get('name') for part in content if isinstance(part, dict) and part.get('type') == 'tool_use']
+    return bool(tools) and not any(name in WAITING_TOOLS for name in tools)
 
 
 def conversation(path):
-    """(timestamp, started a tool) for every message of one transcript, in time order."""
+    """(timestamp, runs a tool) for every message of one transcript, in time order."""
     messages = []
     with open(path, errors='replace') as lines:
         for line in lines:
@@ -53,7 +58,7 @@ def conversation(path):
                 continue
             moment = parse_time(entry.get('timestamp')) if isinstance(entry, dict) else None
             if moment is not None and entry.get('type') in CONVERSATION:
-                messages.append((moment, starts_tool(entry)))
+                messages.append((moment, runs_tool(entry)))
     return sorted(messages)
 
 
@@ -112,12 +117,12 @@ def shared_seconds(activity, own_window, open_windows):
     return total
 
 
-def active_seconds(root, task_ids, window, windows_of_project, transcripts_root):
-    """Working seconds of the issue's projects inside window.
+def active_seconds_by_project(root, task_ids, window, windows_of_project, transcripts_root):
+    """Working seconds inside window for each project of the issue's tasks.
 
     windows_of_project(project) lists the (opened, closed) windows of every issue of that
     project, this one included, as POSIX timestamps.
     """
-    return sum(shared_seconds(project_activity(root, project, transcripts_root), window,
-                              windows_of_project(project))
-               for project in task_projects(root, task_ids))
+    return {project: shared_seconds(project_activity(root, project, transcripts_root), window,
+                                    windows_of_project(project))
+            for project in task_projects(root, task_ids)}

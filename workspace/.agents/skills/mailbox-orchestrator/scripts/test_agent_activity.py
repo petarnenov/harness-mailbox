@@ -50,6 +50,13 @@ class AgentActivityTest(unittest.TestCase):
                    self.message(11, tool=True), self.message(12, 30, 'user'))
         self.assertEqual([(ts(10), ts(10, 50))], self.activity())
 
+    def test_a_tool_that_asks_the_user_is_waiting_not_a_running_tool(self):
+        question = self.message(10, tool=True)
+        question['message']['content'] = [{'type': 'tool_use', 'name': 'AskUserQuestion'}]
+        self.write('s.jsonl', question, self.message(10, 30, 'user'),
+                   self.message(11, tool=True), self.message(11, 30, 'user'))
+        self.assertEqual([(ts(11), ts(11, 30))], self.activity())
+
     def test_subagents_are_merged_so_parallel_work_counts_once(self):
         self.write('s.jsonl', self.message(10), self.message(10, 4))
         self.write('s/subagents/a.jsonl', self.message(10, 2), self.message(10, 6))
@@ -69,14 +76,14 @@ class AgentActivityTest(unittest.TestCase):
         own = (ts(10), ts(13))
         self.assertEqual(1.5 * 3600, agent_activity.shared_seconds(activity, own, [own, (ts(11), ts(14))]))
 
-    def test_active_seconds_sum_the_projects_of_the_issue_tasks(self):
+    def test_active_seconds_are_reported_for_each_project_of_the_issue_tasks(self):
         (self.root / 'tasks' / 'proj').mkdir(parents=True)
         (self.root / 'tasks' / 'proj' / 't-1.json').write_text('{}')
         self.write('s.jsonl', self.message(10), self.message(10, 5))
         window = (ts(9), ts(12))
-        seconds = agent_activity.active_seconds(self.root, {'t-1', 't-missing'}, window, lambda _: [window],
-                                                self.transcripts)
-        self.assertEqual(300, seconds)
+        seconds = agent_activity.active_seconds_by_project(self.root, {'t-1', 't-missing'}, window,
+                                                           lambda _: [window], self.transcripts)
+        self.assertEqual({'proj': 300}, seconds)
 
 
 if __name__ == '__main__':

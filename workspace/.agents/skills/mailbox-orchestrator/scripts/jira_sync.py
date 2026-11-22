@@ -24,7 +24,8 @@ A worklog covers one cycle: from the issue's applied `start` to its latest appli
 from their session transcripts (see agent_activity.py), shared with the other issues of the
 same project open at that moment, in whole hours rounded up. Waiting for an answer, a merge
 or the next message is left out. A reopened issue gets one worklog per cycle. The request is
-refused when the issue has no linked task or its agents left no recorded work in the cycle.
+refused when the issue has no linked task, or when any of its projects left no recorded work
+in the cycle: a partial number never reaches Jira.
 When the cycle's `start` was skipped because Jira was already In Progress, the time of
 that transition from the Jira history must be passed with --in-progress-at. The request
 is refused for a cycle that already has a pending or applied worklog, and for an issue
@@ -132,18 +133,19 @@ def task_ids_by_issue(root):
 
 
 def work_windows(root, issue):
-    """(opened, closed) POSIX times of each closed stay in progress.
+    """(opened, closed) POSIX times of each closed stay in progress, one per cycle.
 
     A stay without a Closed is left out: an abandoned issue would otherwise take a share
     of every later issue of its project.
     """
     starts = sorted(completion_times(root, issue, 'start', 'applied') + completion_times(root, issue, 'start', 'skipped'))
-    closes = completion_times(root, issue, 'verified', 'applied')
-    windows = []
-    for opened in starts:
-        closed = next((moment for moment in closes if moment > opened), None)
-        if closed:
+    windows, previous_closed = [], None
+    for closed in completion_times(root, issue, 'verified', 'applied'):
+        cycle = Cycle(previous_closed, closed)
+        opened = next((moment for moment in starts if cycle.contains(moment)), None)
+        if opened:
             windows.append((opened.timestamp(), closed.timestamp()))
+        previous_closed = closed
     return windows
 
 
@@ -169,11 +171,13 @@ def worked_seconds(root, issue, in_progress_at, closed_at, transcripts_root):
     if not task_ids:
         raise ValueError(f'{issue} has no linked task; its agents\' work cannot be measured')
     window = (in_progress_at.timestamp(), closed_at.timestamp())
-    seconds = agent_activity.active_seconds(root, task_ids, window, project_windows(root, issue, window),
-                                            transcripts_root)
-    if seconds <= 0:
-        raise ValueError(f'{issue} has no recorded agent work between In Progress and Closed')
-    return seconds
+    by_project = agent_activity.active_seconds_by_project(root, task_ids, window,
+                                                          project_windows(root, issue, window), transcripts_root)
+    unmeasured = sorted(project for project, seconds in by_project.items() if seconds <= 0)
+    if unmeasured or not by_project:
+        raise ValueError(f'{issue} has no recorded agent work between In Progress and Closed'
+                         f" in: {', '.join(unmeasured) or 'any project'}")
+    return sum(by_project.values())
 
 
 def whole_hours(seconds):
