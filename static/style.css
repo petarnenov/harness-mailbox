@@ -121,7 +121,8 @@ header{position:sticky;top:0;z-index:20;min-height:76px;height:auto;flex-wrap:wr
 :root:not([data-theme=light]) #issue-detail .detail-remaining{background:linear-gradient(135deg,#3a3021,var(--detail-surface) 75%)}
 :root:not([data-theme=light]) #issue-detail .detail-remaining h3{color:#edc588}
 @media(max-width:650px){#issue-detail{max-height:calc(100dvh - 16px);width:calc(100% - 16px);border-radius:14px}#issue-detail .detail-heading{padding:16px;gap:12px;align-items:flex-start}#issue-detail .detail-heading h2{font-size:16px}#issue-detail #close-detail{padding:8px 10px}#issue-detail-body{padding:16px;gap:16px}#issue-detail .detail-section{padding:16px}#issue-detail .detail-ownership{padding:0}#issue-detail .ownership-roles,#issue-detail .detail-work-grid,#issue-detail .detail-trace{grid-template-columns:minmax(0,1fr)}#issue-detail .detail-next-action>p{font-size:15px}#issue-detail .detail-source-audit{padding:14px}#issue-detail .ownership-role{padding:14px}}
-@media(prefers-reduced-motion:reduce){#issue-detail,#issue-detail *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+#refresh .refresh-icon{display:inline-block}#refresh.refreshing{cursor:progress;opacity:1}#refresh.refreshing .refresh-icon{animation:refresh-spin .8s linear infinite}#refresh.refresh-done{border-color:#3fb950;color:#7ee2a8}@keyframes refresh-spin{to{transform:rotate(360deg)}}.visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+@media(prefers-reduced-motion:reduce){#issue-detail,#issue-detail *,#refresh .refresh-icon{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 
 /* Acceptance criteria: numbered reading cards, explicit outcomes and evidence. */
 #issue-detail .detail-acceptance{background:linear-gradient(135deg,color-mix(in srgb,var(--detail-blue) 7%,var(--detail-surface)),var(--detail-surface) 65%)}
