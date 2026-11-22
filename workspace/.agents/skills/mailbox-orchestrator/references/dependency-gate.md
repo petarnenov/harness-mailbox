@@ -4,15 +4,15 @@ Read this before assigning or resuming project execution. The gate imports the d
 
 ## Commands
 
-Run from the mailbox root. Substitute the actual registered project, task UUID and endpoint; a saved session timestamp does not prove reachability.
+Run from the mailbox root. The script finds the mailbox by the `projects.json` above it, so `--root` is needed only to work on another mailbox. Where the skills are installed directly under the mailbox root, drop the `workspace/` prefix. Substitute the actual registered project, task UUID and endpoint; a saved session timestamp does not prove reachability.
 
 ```sh
-python3 .agents/skills/mailbox-orchestrator/scripts/dispatch_task.py --root "$PWD" check --task tasks/PROJECT/TASK-UUID.json
-python3 .agents/skills/mailbox-orchestrator/scripts/dispatch_task.py --root "$PWD" dispatch --task tasks/PROJECT/TASK-UUID.json --worker-id ACTUAL-ENDPOINT-ID
-python3 .agents/skills/mailbox-orchestrator/scripts/dispatch_task.py --root "$PWD" validate --message inbox/PROJECT/MESSAGE-UUID.json --worker-id ACTUAL-ENDPOINT-ID
+python3 workspace/.agents/skills/mailbox-orchestrator/scripts/dispatch_task.py check --task tasks/PROJECT/TASK-UUID.json
+python3 workspace/.agents/skills/mailbox-orchestrator/scripts/dispatch_task.py dispatch --task tasks/PROJECT/TASK-UUID.json --worker-id ACTUAL-ENDPOINT-ID
+python3 workspace/.agents/skills/mailbox-orchestrator/scripts/dispatch_task.py validate --message inbox/PROJECT/MESSAGE-UUID.json --worker-id ACTUAL-ENDPOINT-ID
 ```
 
-The same interface is available as `python3 dashboard/dispatch_gate.py`. Output is JSON: `allowed`, `operation`, `task_id`, `task_path`, `project`, `endpoint`, `fingerprint`, `prerequisites`, `reasons` and, when published, `audit_path` / `message_path`. Exit codes are 0 for an allowed check, 2 for a dependency/hold denial, and 1 for invalid input or publication failure. Only `operation: dispatch` with an actual bound inbox message is executable; an allowed `check` is never an execution request.
+The same interface is available as `python3 dispatch_gate.py --root "$PWD"` (`dashboard/dispatch_gate.py` in an installed mailbox); called directly, the gate always needs `--root`. Output is JSON: `allowed`, `operation`, `task_id`, `task_path`, `project`, `endpoint`, `fingerprint`, `prerequisites`, `reasons` and, when published, `audit_path` / `message_path`. Exit codes are 0 for an allowed check, 2 for a dependency/hold denial, and 1 for invalid input or publication failure. Only `operation: dispatch` with an actual bound inbox message is executable; an allowed `check` is never an execution request.
 
 ## Orchestrator
 

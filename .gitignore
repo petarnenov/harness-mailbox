@@ -29,6 +29,8 @@ htmlcov/
 /outbox/
 /archive/
 /discovery/
+/dispatch-gates/
+/AGENTS.md
 
 # Make workflow coverage artifacts
 .coverage-output/
