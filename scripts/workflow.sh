@@ -9,6 +9,7 @@ DOCKER=${DOCKER:-docker}
 PROJECT_NAME=${PROJECT_NAME:-mailbox-dashboard}
 NODE_IMAGE=${NODE_IMAGE:-node:22-alpine}
 TOOLS_IMAGE="${PROJECT_NAME}-tools:local"
+SCRIPT_TESTS=workspace/.agents/skills/mailbox-orchestrator/scripts
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 compose() { "$DOCKER" compose --project-name "$PROJECT_NAME" --project-directory "$APP_DIR" --file "$APP_DIR/compose.yaml" "$@"; }
@@ -115,7 +116,11 @@ case "${1:-help}" in
         printf 'Demo fixture mounted; select Explore demo in the dashboard. Run make up to restore live data.\n'
         ;;
     tools) doctor_deps; build_tools ;;
-    test) doctor_deps; run_python -m unittest discover -s tests -v ;;
+    test)
+        doctor_deps
+        run_python -m unittest discover -s tests -v
+        run_python -m unittest discover -s "$SCRIPT_TESTS" -v
+        ;;
     lint)
         doctor_deps
         sh -n scripts/workflow.sh
@@ -129,10 +134,11 @@ case "${1:-help}" in
         mkdir -p "$APP_DIR/.coverage-output"
         "$DOCKER" run --rm --network none --read-only --tmpfs /tmp:rw,exec,nosuid,nodev \
             --user "$(id -u):$(id -g)" --env COVERAGE_FILE=/coverage/.coverage \
+            --env SCRIPT_TESTS="$SCRIPT_TESTS" \
             --mount "type=bind,source=$APP_DIR,target=/workspace,readonly" \
             --mount "type=bind,source=$APP_DIR/.coverage-output,target=/coverage" \
             --workdir /workspace "$TOOLS_IMAGE" sh -c \
-            'python -B -m coverage run --branch --source=server,dependency_graph,dispatch_gate,delivery_process -m unittest discover -s tests -v && python -B -m coverage report -m && python -B -m coverage json -o /coverage/coverage.json && python -B -m coverage html -d /coverage/html'
+            'measure="python -B -m coverage run --branch --source=server,dependency_graph,dispatch_gate,delivery_process,$SCRIPT_TESTS --omit=*/test_*.py" && $measure -m unittest discover -s tests -v && $measure --append -m unittest discover -s "$SCRIPT_TESTS" -v && python -B -m coverage report -m && python -B -m coverage json -o /coverage/coverage.json && python -B -m coverage html -d /coverage/html'
         ;;
     *) fail 'Unknown command. Run make help.' ;;
 esac
