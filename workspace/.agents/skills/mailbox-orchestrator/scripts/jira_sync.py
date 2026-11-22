@@ -7,6 +7,7 @@ Usage:
                                       [--transcripts <folder of Claude Code session transcripts>]
   jira_sync.py [--root <mailbox>] pending
   jira_sync.py [--root <mailbox>] done --id <UUID> --outcome applied|skipped --detail <text>
+  jira_sync.py [--root <mailbox>] worked [--transcripts <folder of Claude Code session transcripts>]
 
 Events and their Jira effect (applied by the orchestrator through its Jira tools):
   start     assign to the user running the orchestrator, move to In Progress
@@ -30,6 +31,10 @@ When the cycle's `start` was skipped because Jira was already In Progress, the t
 that transition from the Jira history must be passed with --in-progress-at. The request
 is refused for a cycle that already has a pending or applied worklog, and for an issue
 that issues.json lists as the parent of others, whose children carry the worklogs.
+
+`worked` changes nothing in Jira and queues nothing. It measures the same way the seconds the
+agents worked so far on every started issue, over all its stays in progress up to now, and
+saves them in jira-sync/worked-so-far.json for the dashboard, which cannot read transcripts.
 """
 import argparse
 import json
@@ -52,6 +57,7 @@ JIRA_STARTED_FORMAT = '%Y-%m-%dT%H:%M:%S.000%z'
 TRANSCRIPTS = Path.home() / '.claude' / 'projects'
 MAILBOX = mailbox_root(__file__)
 ABANDONED_AFTER = timedelta(days=3)
+WORKED_SO_FAR = Path('jira-sync') / 'worked-so-far.json'
 
 
 def now():
@@ -198,6 +204,32 @@ def worked_seconds(root, issue, in_progress_at, closed_at, transcripts_root):
     return sum(by_project.values())
 
 
+def seconds_worked_in(root, issue, task_ids, stay, transcripts_root):
+    by_project = agent_activity.active_seconds_by_project(root, task_ids, stay,
+                                                          project_windows(root, issue, stay), transcripts_root)
+    return sum(by_project.values())
+
+
+def worked_so_far(root, transcripts_root):
+    """Save the seconds the agents worked on each started issue up to now.
+
+    A parent issue is left out: its children carry the work, as they carry the worklogs.
+    """
+    measured_at = now()
+    until = datetime.fromisoformat(measured_at).timestamp()
+    worked = {}
+    for issue, task_ids in task_ids_by_issue(root).items():
+        if not issue or not task_ids or has_children(root, issue):
+            continue
+        stays = [(opened, min(closed, until)) for opened, closed in work_windows(root, issue, task_ids)]
+        if stays:
+            worked[issue] = round(sum(seconds_worked_in(root, issue, task_ids, stay, transcripts_root)
+                                      for stay in stays))
+    snapshot = {'measured_at': measured_at, 'worked_seconds': worked}
+    write_atomic(root / WORKED_SO_FAR, snapshot)
+    return snapshot
+
+
 def whole_hours(seconds):
     return math.ceil(seconds / SECONDS_PER_HOUR)
 
@@ -285,11 +317,15 @@ def run():
     done_cmd.add_argument('--id', required=True)
     done_cmd.add_argument('--outcome', required=True, choices=['applied', 'skipped'])
     done_cmd.add_argument('--detail', required=True)
+    worked_cmd = commands.add_parser('worked')
+    worked_cmd.add_argument('--transcripts', type=Path)
     args = parser.parse_args()
     if args.command == 'queue':
         result = queue(args.root, args.issue, args.event, args.ref, args.in_progress_at, args.transcripts)
     elif args.command == 'pending':
         result = pending(args.root)
+    elif args.command == 'worked':
+        result = worked_so_far(args.root, args.transcripts or TRANSCRIPTS)
     else:
         result = done(args.root, args.id, args.outcome, args.detail)
     print(json.dumps(result, indent=2))

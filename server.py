@@ -99,6 +99,24 @@ def reported_estimate_hours(record):
     return estimate_range(record.get('agent_estimate_hours')) or estimate_range(record.get('codex_estimate_hours'))
 
 
+def original_estimate_hours(record):
+    """The Jira original estimate, which an import records as `estimate: {value, unit: "hours"}`."""
+    estimate = record.get('estimate')
+    if isinstance(estimate, dict) and estimate.get('unit') == 'hours' and number(estimate.get('value')):
+        return estimate['value']
+    return None
+
+
+def worked_so_far(root, warnings):
+    """Hours the agents worked per issue and when they were measured (`jira_sync.py worked`)."""
+    path = root / 'jira-sync' / 'worked-so-far.json'
+    snapshot = read_json(root, path, warnings) if path.exists() else None
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    seconds = snapshot.get('worked_seconds')
+    hours = {key: round(value / 3600, 2) for key, value in seconds.items() if number(value)} if isinstance(seconds, dict) else {}
+    return {'measured_at': snapshot.get('measured_at') if isinstance(snapshot.get('measured_at'), str) else None, 'hours': hours}
+
+
 def estimate_range(value):
     if isinstance(value, dict) and all(number(value.get(k)) for k in ('low', 'likely', 'high')):
         if value['low'] <= value['likely'] <= value['high']:
@@ -301,6 +319,7 @@ def build_dashboard(root, model=None, mode='live'):
             if key in links:
                 links[key].add(task['id'])
     issues = {}
+    worked = worked_so_far(root, warnings)
     for item in raw_issues:
         key = item.get('key', item.get('issue_key'))
         if not isinstance(key, str):
@@ -329,6 +348,8 @@ def build_dashboard(root, model=None, mode='live'):
                       'source_status': str(source_status), 'verified': verified,
                       'dependencies': strings(item.get('depends_on', item.get('dependencies'))), 'task_ids': linked,
                       'estimate': reported_estimate_hours(item),
+                      'original_estimate_hours': original_estimate_hours(item),
+                      'worked_hours': worked['hours'].get(key),
                       'actual_machine_hours': item.get('actual_machine_hours') if number(item.get('actual_machine_hours')) else None,
                       'missing_record': item.get('_missing', False), 'conflict': False,
                       'teams': record_teams(item, sorted({team for pid in pids for team in projects[pid]['teams']}))}
@@ -413,7 +434,7 @@ def build_dashboard(root, model=None, mode='live'):
             'tasks': tasks, 'dependencies': dependencies, 'external_dependencies': external,
             'graph': graph,
             'task_dependencies': [{'from': dep, 'to': t['id'], 'kind': 'task_dependency', 'unresolved': dep not in task_map} for t in tasks for dep in t['depends_on']],
-            'reported_statistics': reported,
+            'reported_statistics': reported, 'worked_measured_at': worked['measured_at'],
             'totals': metrics(issue_list, complete, model), 'estimate_method': model}
 
 

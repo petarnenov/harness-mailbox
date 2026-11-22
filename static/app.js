@@ -425,10 +425,21 @@ function renderTasks(s) {
  s.tasks.forEach(t=>area.append(taskCard(t)));
  if(!s.tasks.length)empty(area,'No local tasks yet','Tasks appear here even before they are mapped to Jira.');
 }
+function recordedHours(hours,missing) { return hours===null||hours===undefined?missing:moneyless(hours)+' h'; }
+function issueTime(key) {
+  const issue=data.issues.find(i=>i.key===key);if(!issue)return null;
+  const measured=issue.worked_hours===null||!data.worked_measured_at?'':' · measured '+timestampDescription(data.worked_measured_at);
+  return `${key} · Original estimate: ${recordedHours(issue.original_estimate_hours,'not recorded')} · Worked so far: ${recordedHours(issue.worked_hours,'not measured')}${measured}`;
+}
+function taskTime(t) {
+  const lines=t.issue_keys.map(issueTime).filter(Boolean);
+  return (lines.length?lines:['No linked issue · original estimate and worked time unavailable']).map(line=>el('p',line,'task-time'));
+}
 function taskCard(t) {
   const card=el('article',undefined,'task');card.dataset.status=t.status;
   const mapping=taskAssociation(t);
   card.append(el('p','Local task · '+t.id.slice(0,8),'local-identity'),el('strong',taskDisplayTitle(t)),status(t.status),el('p',`${t.project} · ${(t.teams||[]).join(', ')||'Unassigned'} · ${mapping}`));
+  card.append(...taskTime(t));
   if(t.unresolved_issue_keys.length)card.append(el('p','Unresolved keys: '+t.unresolved_issue_keys.join(', ')));
   card.append(el('p',`${t.evidenced?'Completion evidence recorded':'Completion evidence pending'} · task only; issue verification is separate`),el('p',t.id),el('p',`Updated: ${t.updated_at||'Timestamp unavailable'} · ${t.source}`));
   const original=el('details');original.append(el('summary','Original task record'),el('p','Full local task ID: '+t.id),el('p','Full recorded title: '+t.title),el('p',mapping));card.append(original);

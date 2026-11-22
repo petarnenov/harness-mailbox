@@ -146,9 +146,12 @@ The backend reads only these JSON paths, with a 4 MB per-file bound. Paths outsi
   "task_ids":["task-uuid"], "depends_on":["OUTSIDE-1"],
   "verification":{"outcome":"passed"}, "evidence":["local/artifact/path"],
   "agent_estimate_hours":{"low":1,"likely":2,"high":4},
-  "actual_machine_hours":1.3
+  "actual_machine_hours":1.3,
+  "estimate":{"value":8,"unit":"hours"}
 }
 ```
+
+`estimate` is the Jira original estimate. Each task card shows it for the task's linked issues, next to the hours the agents worked on the issue so far. Those hours come from `jira-sync/worked-so-far.json`, which the orchestrator writes with `jira_sync.py worked` on its own machine; the dashboard cannot read session transcripts, so the card also shows when they were measured. A parent issue has no worked hours of its own.
 
 Aliases: `issue_key`, `summary`, `affected_projects`, `local_task_ids`, `jira_status`, `verification_outcome`, `acceptance_criterion_evidence` / `acceptance_criteria_evidence`. `dependencies` is accepted as a string array equivalent to `depends_on`. Scope aliases: `key`, `scope_complete`, `in_scope_issue_keys`. External dependencies can also be objects with a `key`; these are Epic-level relationships, not automatically in-scope issues.
 

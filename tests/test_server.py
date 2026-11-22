@@ -130,6 +130,22 @@ class DashboardBuildTests(Fixture):
         self.assertEqual({'low': 4.0, 'likely': 6.0, 'high': 8.0}, data['totals']['estimate'])
         self.assertEqual(2, data['totals']['explicit_estimates'])
 
+    def test_issue_exposes_its_original_estimate_and_the_hours_worked_so_far(self):
+        self.epic('E', ['A-1', 'A-2'], True, [{'key': 'A-1', 'estimate': {'value': 8, 'unit': 'hours'}},
+                                              {'key': 'A-2', 'estimate': {'value': 3, 'unit': 'days'}}])
+        self.put('jira-sync/worked-so-far.json', {'measured_at': '2026-11-22T14:00:00+00:00',
+                                                  'worked_seconds': {'A-1': 5400, 'A-2': 'unknown'}})
+        data = server.build_dashboard(self.root, MODEL)
+        issues = {i['key']: (i['original_estimate_hours'], i['worked_hours']) for i in data['issues']}
+        self.assertEqual({'A-1': (8, 1.5), 'A-2': (None, None)}, issues)
+        self.assertEqual('2026-11-22T14:00:00+00:00', data['worked_measured_at'])
+
+    def test_worked_hours_are_unknown_without_a_measurement(self):
+        self.epic('E', ['A-1'], True, [{'key': 'A-1'}])
+        data = server.build_dashboard(self.root, MODEL)
+        self.assertIsNone(data['issues'][0]['worked_hours'])
+        self.assertIsNone(data['worked_measured_at'])
+
     def test_model_estimates_explicit_override_actual_null_and_partial_actuals(self):
         self.epic('E', ['A-1', 'A-2'], True, [
             {'key': 'A-1', 'codex_estimate_hours': {'low': 3, 'likely': 4, 'high': 5}, 'actual_machine_hours': 2.5},

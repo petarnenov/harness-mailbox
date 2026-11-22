@@ -116,6 +116,23 @@ class JiraSyncTest(unittest.TestCase):
         self.apply(issue, 'start', in_progress_at)
         self.apply(issue, 'verified', closed_at)
 
+    def test_worked_so_far_measures_an_open_issue_up_to_now_and_saves_it_for_the_dashboard(self):
+        self.busy(self.link('GEO-1'), '2026-11-22T10:00:00+00:00', '2026-11-22T12:00:00+00:00')
+        self.apply('GEO-1', 'start', '2026-11-22T10:00:00+00:00')
+        with mock.patch.object(jira_sync, 'now', return_value='2026-11-22T10:30:00+00:00'):
+            snapshot = jira_sync.worked_so_far(self.root, self.transcripts)
+        self.assertEqual({'measured_at': '2026-11-22T10:30:00+00:00', 'worked_seconds': {'GEO-1': 1800}}, snapshot)
+        self.assertEqual(snapshot, json.loads((self.root / 'jira-sync' / 'worked-so-far.json').read_text()))
+
+    def test_worked_so_far_keeps_a_closed_issue_and_leaves_out_unstarted_and_parent_issues(self):
+        self.worked('GEO-1', '2026-11-22T10:00:00+00:00', '2026-11-22T11:00:00+00:00')
+        self.link('GEO-2')
+        self.worked('GEO-3', '2026-11-22T13:00:00+00:00', '2026-11-22T14:00:00+00:00')
+        self.write_issues('E-child', {'key': 'GEO-4', 'parent_key': 'GEO-3'})
+        with mock.patch.object(jira_sync, 'now', return_value='2026-11-23T09:00:00+00:00'):
+            snapshot = jira_sync.worked_so_far(self.root, self.transcripts)
+        self.assertEqual({'GEO-1': 3600}, snapshot['worked_seconds'])
+
     def test_worklog_rounds_in_progress_to_closed_up_to_whole_hours(self):
         self.worked('GEO-1', '2026-11-22T10:00:00+00:00', '2026-11-22T12:00:01+00:00')
         worklog = jira_sync.queue(self.root, 'GEO-1', 'worklog')
