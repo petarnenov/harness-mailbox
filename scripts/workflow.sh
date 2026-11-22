@@ -127,6 +127,9 @@ case "${1:-help}" in
         doctor_deps
         run_python -m unittest discover -s tests -v
         run_python -m unittest discover -s "$SCRIPT_TESTS" -v
+        "$DOCKER" run --rm --network none --read-only --tmpfs /tmp:rw,exec,nosuid,nodev \
+            --mount "type=bind,source=$APP_DIR,target=/workspace,readonly" \
+            --workdir /workspace "$NODE_IMAGE" sh -c 'node --test tests/js/*.test.mjs'
         ;;
     lint)
         doctor_deps

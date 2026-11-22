@@ -29,6 +29,7 @@ function hasOpenDependents(nodeId) {const ready=new Set((data.graph?.nodes||[]).
 function completedLongerThan(record,minutes,now=Date.now()) {const at=Date.parse(record.verified_at||record.updated_at||'');return !Number.isFinite(at)||now-at>minutes*60000;}
 function isSettledCompletedTask(task) {return task.evidenced===true&&!hasOpenDependents('task:'+task.id)&&completedLongerThan(task,settledCompletionMinutes);}
 function isSettledCompletedIssue(issue) {return issue.verified===true&&!hasOpenDependents('issue:'+issue.key)&&completedLongerThan(issue,settledCompletionMinutes);}
+function settledCompletedNodeIds() {return new Set([...data.issues.filter(isSettledCompletedIssue).map(i=>'issue:'+i.key),...data.tasks.filter(isSettledCompletedTask).map(t=>'task:'+t.id)]);}
 function matchesTeam(record,team) { const teams=record.teams||[];return !team||(team==='unassigned'?teams.length===0:teams.includes(team)); }
 function selection() {
  const p=$('project').value,e=$('epic').value,team=$('team').value,q=$('search').value.trim().toLowerCase(),hideCompleted=$('hide-completed').checked;
@@ -211,10 +212,11 @@ function captureComparison(s) {
  const key=comparisonKey(s),current=snapshotForComparison(s);try{const raw=localStorage.getItem(key);if(!raw)comparison={key,message:'First visit to this filtered scope. The current snapshot is saved for the next successful refresh.',changes:[]};else{let previous;try{previous=JSON.parse(raw);}catch(_){previous=null;}comparison=validComparisonSnapshot(previous)?{key,message:'Compared with this scope last viewed at '+previous.read_at,changes:snapshotChanges(previous,current)}:{key,message:'Saved comparison is unavailable or invalid. A new baseline is saved for the next refresh.',changes:[]};}localStorage.setItem(key,JSON.stringify(current));}catch(_){comparison={key,message:'Browser storage unavailable; changes since the last view cannot be persisted.',changes:[]};}
 }
 function renderChanges(s) {const area=$('changes-since-view');area.replaceChildren();if(!comparison||comparison.key!==comparisonKey(s)){area.append(el('p','Refresh data to compare this filtered scope. Switching filters, tabs or focus does not advance its baseline.'));return;}area.append(el('p',comparison.message));comparison.changes.forEach(change=>area.append(el('p',change,'scope-change')));if(!comparison.changes.length&&comparison.message.startsWith('Compared'))area.append(el('p','No issue or local task additions, removals, stage, blocker, verified-completion or scope / association changes.'));}
-function focusGraph(graph,view,id,mode,descendantsOnly=false) {
+function focusGraph(graph,view,id,mode,descendantsOnly=false,hiddenIds=new Set()) {
  if(!id)return view;if(!graph.nodes.some(n=>n.id===id))return {nodes:[],edges:[],focusMissing:true};
  const edges=graph.edges.filter(e=>e.kind===(mode==='hierarchy'?'membership':'requires')),visible=new Set([id]);
  for(const direction of descendantsOnly?['descendants']:['ancestors','descendants']){const seen=new Set([id]),queue=[id];for(let index=0;index<queue.length;index++){const current=queue[index];edges.forEach(e=>{const next=direction==='ancestors'?(e.to===current?e.from:null):(e.from===current?e.to:null);if(next&&!seen.has(next)){seen.add(next);visible.add(next);queue.push(next);}});}}
+ hiddenIds.forEach(hidden=>{if(hidden!==id)visible.delete(hidden);});
  const selected=new Set(view.nodes.filter(n=>!n.boundary).map(n=>n.id));return {nodes:graph.nodes.filter(n=>visible.has(n.id)).map(n=>({...n,boundary:!selected.has(n.id)})),edges:edges.filter(e=>visible.has(e.from)&&visible.has(e.to))};
 }
 function renderMetrics(s) {
@@ -337,7 +339,7 @@ function renderMap(s) {
  $('graph-legend').textContent=mode==='hierarchy'?'Membership only: project → Epic → parent issue → subtask → linked local work. Membership does not impose execution order.':'Prerequisite → dependent. Markers: green ✓ verified complete · blue ● in progress · orange ! blocked / unmet · gray ○ unverified. Dashed: context / unresolved · coral edges: cycle.';
  if(!data.graph){empty(area,'Relationship data unavailable','Refresh after updating the dashboard projection. No dependencies are inferred from task titles or blockers.');$('graph-summary').textContent='No graph snapshot available.';return;}
  const showLocal=$('graph-local-work').checked,groups=localWorkGroups(data.graph,s);renderLocalWork(groups);
- const baseView=selectGraph(data.graph,s,mode,showLocal),rawView=s.invalid?.length?{nodes:[],edges:[]}:focusGraph(data.graph,baseView,focusId,mode,focusSubtree),kept=new Set(rawView.nodes.filter(n=>showLocal||focusSubtree||n.kind!=='task'||!n.ready).map(n=>n.id));
+ const baseView=selectGraph(data.graph,s,mode,showLocal),hiddenIds=s.hideCompleted?settledCompletedNodeIds():new Set(),rawView=s.invalid?.length?{nodes:[],edges:[]}:focusGraph(data.graph,baseView,focusId,mode,focusSubtree,hiddenIds),kept=new Set(rawView.nodes.filter(n=>showLocal||focusSubtree||n.kind!=='task'||!n.ready).map(n=>n.id));
  const view={nodes:rawView.nodes.filter(n=>kept.has(n.id)),edges:rawView.edges.filter(e=>kept.has(e.from)&&kept.has(e.to))},selected=view.nodes.filter(n=>!n.boundary),boundary=view.nodes.length-selected.length;
  $('focus-summary').textContent=focusId?(rawView.focusMissing?'Focus unavailable: '+focusId:(focusSubtree?'Showing every linked descendant of '+focusId+' (children, their children and local tasks)':'Focused on '+focusId+' · prerequisites and dependents')+'; outside-filter context does not change totals.'):'No graph focus · showing filtered scope';$('clear-focus').hidden=!focusId;
  const connected=new Set(view.edges.flatMap(e=>[e.from,e.to]));
