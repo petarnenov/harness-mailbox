@@ -126,29 +126,39 @@ def task_ids_by_issue(root):
     task_ids = {}
     for issues_file in (root / 'epics').glob('*/issues.json'):
         for record in json.loads(issues_file.read_text()).get('issues', []):
-            task_ids.setdefault(record.get('key'), set()).update(record.get('task_ids') or [])
+            linked = (record.get('task_ids') or []) + (record.get('local_task_ids') or [])
+            task_ids.setdefault(record.get('key', record.get('issue_key')), set()).update(linked)
     return task_ids
 
 
 def work_windows(root, issue):
-    """(opened, closed) POSIX times of each stay in progress; a stay not yet closed lasts until now."""
+    """(opened, closed) POSIX times of each closed stay in progress.
+
+    A stay without a Closed is left out: an abandoned issue would otherwise take a share
+    of every later issue of its project.
+    """
     starts = sorted(completion_times(root, issue, 'start', 'applied') + completion_times(root, issue, 'start', 'skipped'))
     closes = completion_times(root, issue, 'verified', 'applied')
     windows = []
     for opened in starts:
-        closed = next((moment for moment in closes if moment > opened), datetime.fromisoformat(now()))
-        windows.append((opened.timestamp(), closed.timestamp()))
+        closed = next((moment for moment in closes if moment > opened), None)
+        if closed:
+            windows.append((opened.timestamp(), closed.timestamp()))
     return windows
 
 
 def project_windows(root, issue, own_window):
-    """For each project: the work windows of all its issues, with this issue's cycle as own_window."""
-    task_ids = task_ids_by_issue(root)
+    """For each project: this issue's cycle as own_window, plus the closed windows of its other issues.
+
+    A parent issue shares nothing: it is open as long as its children and gets no worklog of its own.
+    """
+    task_ids = {other: tasks for other, tasks in task_ids_by_issue(root).items()
+                if other != issue and not has_children(root, other)}
 
     def windows_of(project):
         windows = [own_window]
         for other, other_tasks in task_ids.items():
-            if other != issue and project in agent_activity.task_projects(root, other_tasks):
+            if project in agent_activity.task_projects(root, other_tasks):
                 windows += work_windows(root, other)
         return windows
     return windows_of

@@ -147,6 +147,25 @@ class JiraSyncTest(unittest.TestCase):
         second = jira_sync.queue(self.root, 'GEO-2', 'worklog')
         self.assertEqual((3 * 3600, 3600), (first['worked_seconds'], second['worked_seconds']))
 
+    def test_parent_issue_takes_no_share_of_its_childs_work(self):
+        self.worked('GEO-2', '2026-11-22T10:00:00+00:00', '2026-11-22T14:00:00+00:00', project='shared')
+        self.write_issues('E-story', {'key': 'GEO-1', 'task_ids': ['t-GEO-2']},
+                          {'key': 'GEO-2', 'parent_key': 'GEO-1'})
+        self.apply('GEO-1', 'start', '2026-11-22T10:00:00+00:00')
+        self.apply('GEO-1', 'verified', '2026-11-22T14:00:00+00:00')
+        self.assertEqual(4 * 3600, jira_sync.queue(self.root, 'GEO-2', 'worklog')['worked_seconds'])
+
+    def test_issue_that_was_never_closed_takes_no_share(self):
+        self.link('GEO-9', project='shared')
+        self.apply('GEO-9', 'start', '2026-11-22T08:00:00+00:00')
+        self.worked('GEO-2', '2026-11-22T10:00:00+00:00', '2026-11-22T14:00:00+00:00', project='shared')
+        self.assertEqual(4 * 3600, jira_sync.queue(self.root, 'GEO-2', 'worklog')['worked_seconds'])
+
+    def test_linked_tasks_are_read_through_the_issue_key_and_local_task_ids_aliases(self):
+        self.worked('GEO-1', '2026-11-22T10:00:00+00:00', '2026-11-22T12:00:00+00:00')
+        self.write_issues('E-GEO-1', {'issue_key': 'GEO-1', 'local_task_ids': ['t-GEO-1']})
+        self.assertEqual('2h', jira_sync.queue(self.root, 'GEO-1', 'worklog')['time_spent'])
+
     def test_worklog_is_refused_without_a_linked_task_or_any_recorded_work(self):
         self.apply('GEO-1', 'start', '2026-11-22T10:00:00+00:00')
         self.apply('GEO-1', 'verified', '2026-11-22T12:00:00+00:00')
