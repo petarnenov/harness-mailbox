@@ -67,6 +67,15 @@ Serialize Git updates with the checkout owner and finish active builds/tests bef
 
 Record `integration_sync` in task evidence: UTC time, branch, remote, before SHA, fetched remote SHA, after SHA, commands and results. Verify that the local integration branch contains the fetched origin tip; reconcile any unexplained local-ahead commits before using it as a task base. Create new task worktrees from the synchronized integration branch. Child agents inherit the binding and verify the owner's synchronization evidence for their task; coordinate refreshes through that owner instead of racing shared Git operations. Do not silently rebase existing task worktrees; report integration changes and refresh affected verification through the project loop. The orchestrator checks this prerequisite before accepting execution evidence.
 
+**Check it in the record, not in the message (user, 2026-11-22).** Before accepting any worker report, open its `integration_sync` and compare it with the integration branch on `origin`, fetched by you at that moment:
+
+- the branch is the task's confirmed integration branch and the remote is `origin`;
+- the after SHA equals the fetched remote SHA the worker recorded;
+- that SHA is the current `origin/<integration_branch>` tip or an ancestor of it; when origin has moved since, name the commits the report did not see;
+- the SHA the report says it tested or based its work on is that same after SHA.
+
+A missing `integration_sync`, a missing SHA or any mismatch means the report is not accepted: return it to the worker with the exact difference. A worker's statement that it synchronized does not replace this check.
+
 ## Deliver and receive
 
 Files are the durable record and the only transport every host shares. Session-messaging tools are the preferred notification transport only after reachability is established.
