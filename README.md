@@ -30,7 +30,7 @@ harness-mailbox/
     └── .env            # local configuration, ignored by Git
 ```
 
-Run `make setup` from `dashboard/`; it detects the parent mailbox directory when `projects.json` is present. You can also set `MAILBOX_ROOT` explicitly. The source checkout is scoped to the component so private coordination records remain outside the published files. Runtime data stays local and is mounted read-only.
+Run `make setup` from `dashboard/`; it detects the mailbox by its `projects.json`, in the checkout itself or else in the parent directory. You can also set `MAILBOX_ROOT` explicitly. The source checkout is scoped to the component so private coordination records remain outside the published files. Runtime data stays local and is mounted read-only.
 
 ## Start with Make
 
@@ -57,7 +57,7 @@ make doctor
 make up
 ```
 
-If the component is already present, run the same Make commands there. Setup detects the parent mailbox's `projects.json`, creates `.env` only when absent, and installs a forwarding `Makefile` in the parent workspace if it has none. After setup, all commands also work directly from the mailbox root. Existing `.env` and root `Makefile` files are preserved.
+If the component is already present, run the same Make commands there. Setup detects the mailbox's `projects.json` in the checkout or its parent, creates `.env` only when absent, and installs a forwarding `Makefile` in the parent workspace if it has none. After setup, all commands also work directly from the mailbox root. Existing `.env` and root `Makefile` files are preserved.
 
 For a mailbox at another location, provide its absolute path:
 

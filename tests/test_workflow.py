@@ -116,6 +116,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(config, (self.app / '.env').read_bytes())
         self.assertEqual('# existing custom workspace Makefile\n', (self.root / 'Makefile').read_text())
 
+    def test_setup_detects_a_mailbox_living_in_the_app_directory(self):
+        (self.root / 'projects.json').unlink()
+        (self.app / 'projects.json').write_text('{"projects": []}')
+        result = self.run_workflow('setup')
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("MAILBOX_ROOT='" + str(self.app) + "'\n", (self.app / '.env').read_text())
+        self.assertFalse((self.root / 'Makefile').exists())
+
+    def test_setup_prefers_the_app_directory_mailbox_over_the_parent(self):
+        (self.app / 'projects.json').write_text('{"projects": []}')
+        result = self.run_workflow('setup')
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("MAILBOX_ROOT='" + str(self.app) + "'\n", (self.app / '.env').read_text())
+
     def test_existing_config_and_override_are_preserved(self):
         config = b"# retained comment\nMAILBOX_ROOT='/does/not/exist'\n"
         (self.app / '.env').write_bytes(config)

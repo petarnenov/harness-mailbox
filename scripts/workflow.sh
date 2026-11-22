@@ -42,12 +42,19 @@ doctor_config() {
     printf 'OK: mailbox directory and projects.json\nOK: Compose configuration\n'
 }
 
+# A mailbox either lives in this checkout or holds it as a subdirectory.
+detect_mailbox_root() {
+    for candidate in "$APP_DIR" "$APP_DIR/.."; do
+        if [ -f "$candidate/projects.json" ]; then
+            (CDPATH= cd -- "$candidate" && pwd)
+            return
+        fi
+    done
+}
+
 prepare_config() {
     if [ ! -e .env ]; then
-        data_root=${MAILBOX_ROOT:-}
-        if [ -z "$data_root" ] && [ -f "$APP_DIR/../projects.json" ]; then
-            data_root=$(CDPATH= cd -- "$APP_DIR/.." && pwd)
-        fi
+        data_root=${MAILBOX_ROOT:-$(detect_mailbox_root)}
         [ -n "$data_root" ] || fail 'No mailbox directory detected. Run MAILBOX_ROOT=/absolute/mailbox/path make setup.'
         case "$data_root" in /*) ;; *) fail 'MAILBOX_ROOT must be an absolute directory path.' ;; esac
         [ -f "$data_root/projects.json" ] || fail 'Selected mailbox directory has no projects.json; .env was not created.'
