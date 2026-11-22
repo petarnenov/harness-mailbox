@@ -82,6 +82,7 @@ class JiraSyncTest(unittest.TestCase):
         self.assertEqual('3h', worklog['time_spent'])
         self.assertEqual('2026-11-22T10:00:00.000+0000', worklog['started'])
         self.assertEqual('2026-11-22T12:00:01+00:00', worklog['closed_at'])
+        self.assertEqual('applied start', worklog['in_progress_source'])
 
     def test_worklog_keeps_exact_hours_and_never_logs_less_than_one(self):
         self.worked('GEO-1', '2026-11-22T10:00:00+00:00', '2026-11-22T12:00:00+00:00')
@@ -89,18 +90,68 @@ class JiraSyncTest(unittest.TestCase):
         self.assertEqual('2h', jira_sync.queue(self.root, 'GEO-1', 'worklog')['time_spent'])
         self.assertEqual('1h', jira_sync.queue(self.root, 'GEO-2', 'worklog')['time_spent'])
 
-    def test_worklog_spans_first_in_progress_to_last_closed(self):
+    def test_reopened_issue_gets_one_worklog_per_cycle(self):
         self.worked('GEO-1', '2026-11-22T10:00:00+00:00', '2026-11-22T11:00:00+00:00')
+        first = jira_sync.queue(self.root, 'GEO-1', 'worklog')
+        jira_sync.done(self.root, first['id'], 'applied', 'worklog 10001')
         self.worked('GEO-1', '2026-11-22T13:00:00+00:00', '2026-11-22T15:00:00+00:00')
-        self.assertEqual('5h', jira_sync.queue(self.root, 'GEO-1', 'worklog')['time_spent'])
+        second = jira_sync.queue(self.root, 'GEO-1', 'worklog')
+        self.assertEqual(('1h', '2h'), (first['time_spent'], second['time_spent']))
+        self.assertEqual('2026-11-22T13:00:00.000+0000', second['started'])
 
-    def test_worklog_is_refused_until_start_and_verified_were_applied(self):
+    def test_worklog_is_refused_without_a_verified_or_a_start_update(self):
         self.apply('GEO-1', 'verified', '2026-11-22T12:00:00+00:00')
-        self.apply('GEO-1', 'start', '2026-11-22T10:00:00+00:00', outcome='skipped')
         self.apply('GEO-2', 'start', '2026-11-22T10:00:00+00:00')
         for issue in ('GEO-1', 'GEO-2'):
             with self.assertRaises(ValueError):
                 jira_sync.queue(self.root, issue, 'worklog')
+
+    def skipped_start(self, issue, closed_at):
+        self.apply(issue, 'start', '2026-11-22T10:00:00+00:00', outcome='skipped')
+        self.apply(issue, 'verified', closed_at)
+
+    def test_skipped_start_takes_in_progress_from_the_jira_history(self):
+        self.skipped_start('GEO-1', '2026-11-22T12:00:00+00:00')
+        with self.assertRaises(ValueError):
+            jira_sync.queue(self.root, 'GEO-1', 'worklog')
+        from_history = jira_sync.jira_history_time('2026-11-22T02:30:00-06:00')
+        worklog = jira_sync.queue(self.root, 'GEO-1', 'worklog', jira_in_progress_at=from_history)
+        self.assertEqual('4h', worklog['time_spent'])
+        self.assertEqual('2026-11-22T08:30:00.000+0000', worklog['started'])
+        self.assertEqual('jira history', worklog['in_progress_source'])
+
+    def test_jira_history_time_is_refused_outside_the_cycle_or_beside_an_applied_start(self):
+        self.worked('GEO-1', '2026-11-22T08:00:00+00:00', '2026-11-22T09:00:00+00:00')
+        self.skipped_start('GEO-1', '2026-11-22T12:00:00+00:00')
+        self.worked('GEO-2', '2026-11-22T10:00:00+00:00', '2026-11-22T12:00:00+00:00')
+        refused = [('GEO-1', '2026-11-22T08:30:00+00:00'), ('GEO-1', '2026-11-22T12:30:00+00:00'),
+                   ('GEO-2', '2026-11-22T09:00:00+00:00')]
+        for issue, moment in refused:
+            with self.assertRaises(ValueError):
+                jira_sync.queue(self.root, issue, 'worklog',
+                                jira_in_progress_at=jira_sync.jira_history_time(moment))
+
+    def test_jira_history_time_needs_a_utc_offset_and_the_worklog_event(self):
+        with self.assertRaises(ValueError):
+            jira_sync.jira_history_time('2026-11-22T08:30:00')
+        with self.assertRaises(ValueError):
+            jira_sync.queue(self.root, 'GEO-1', 'start',
+                            jira_in_progress_at=jira_sync.jira_history_time('2026-11-22T08:30:00+00:00'))
+
+    def test_worklog_is_refused_for_a_parent_issue(self):
+        self.write_issues('E-1', {'key': 'GEO-2', 'parent_key': 'GEO-1'},
+                          {'key': 'GEO-4', 'parent': {'key': 'GEO-3'}})
+        for parent in ('GEO-1', 'GEO-3'):
+            self.worked(parent, '2026-11-22T10:00:00+00:00', '2026-11-22T12:00:00+00:00')
+            with self.assertRaises(ValueError):
+                jira_sync.queue(self.root, parent, 'worklog')
+
+    def test_command_line_reports_a_refusal_in_one_line(self):
+        arguments = ['jira_sync.py', '--root', str(self.root), 'queue', '--issue', 'GEO-1', '--event', 'worklog']
+        with mock.patch.object(jira_sync.sys, 'argv', arguments), self.assertRaises(SystemExit) as refusal:
+            jira_sync.main()
+        self.assertEqual('jira_sync: GEO-1 needs an applied verified update before its worklog',
+                         refusal.exception.code)
 
     def test_worklog_is_queued_once_per_issue_unless_it_was_skipped(self):
         self.worked('GEO-1', '2026-11-22T10:00:00+00:00', '2026-11-22T12:00:00+00:00')

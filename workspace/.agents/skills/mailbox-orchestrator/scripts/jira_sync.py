@@ -3,6 +3,7 @@
 
 Usage:
   jira_sync.py --root <mailbox> queue --issue <KEY> --event start|pr|verified|worklog [--ref <text>]
+                                      [--in-progress-at <ISO time from the Jira history>]
   jira_sync.py --root <mailbox> pending
   jira_sync.py --root <mailbox> done --id <UUID> --outcome applied|skipped --detail <text>
 
@@ -17,17 +18,22 @@ and an audit trail under jira-sync/done, so a failed or skipped update stays vis
 An applied update also refreshes the issue's `source_status` snapshot in every
 epics/*/issues.json that lists it, because the dashboard reads Jira status from there.
 
-A worklog is measured between the moments the issue's `start` and `verified` updates
-were applied, in whole hours rounded up. It is refused until both were applied, and
-when the issue already has a pending or applied worklog.
+A worklog covers one cycle: from the issue's applied `start` to its latest applied
+`verified`, in whole hours rounded up. A reopened issue gets one worklog per cycle.
+When the cycle's `start` was skipped because Jira was already In Progress, the time of
+that transition from the Jira history must be passed with --in-progress-at. The request
+is refused for a cycle that already has a pending or applied worklog, and for an issue
+that issues.json lists as the parent of others, whose children carry the worklogs.
 """
 import argparse
 import json
 import math
 import os
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple, Optional
 
 TARGET_STATUS = {'start': 'In Progress', 'pr': 'Development Peer Review', 'verified': 'Closed'}
 WORKLOG = 'worklog'
@@ -56,20 +62,60 @@ def pending(root):
     return sorted(read_requests(root, 'pending'), key=lambda r: r['queued_at'])
 
 
-def applied(root, issue, event):
-    return [r for r in read_requests(root, 'done')
-            if r['issue'] == issue and r['event'] == event and r['outcome'] == 'applied']
+def completion_times(root, issue, event, outcome):
+    return sorted(datetime.fromisoformat(r['completed_at']) for r in read_requests(root, 'done')
+                  if r['issue'] == issue and r['event'] == event and r['outcome'] == outcome)
 
 
-def has_worklog(root, issue):
-    queued = [r for r in pending(root) if r['issue'] == issue and r['event'] == WORKLOG]
-    return bool(queued or applied(root, issue, WORKLOG))
+class Cycle(NamedTuple):
+    """One stay of an issue between the previous Closed (if any) and this Closed."""
+    previous_closed_at: Optional[datetime]
+    closed_at: datetime
+
+    def contains(self, moment):
+        after_previous = self.previous_closed_at is None or moment > self.previous_closed_at
+        return after_previous and moment <= self.closed_at
+
+
+def last_closed_cycle(root, issue):
+    closes = completion_times(root, issue, 'verified', 'applied')
+    if not closes:
+        raise ValueError(f'{issue} needs an applied verified update before its worklog')
+    return Cycle(closes[-2] if len(closes) > 1 else None, closes[-1])
+
+
+def has_worklog(root, issue, cycle):
+    logged = pending(root) + [r for r in read_requests(root, 'done') if r['outcome'] == 'applied']
+    return any(r['issue'] == issue and r['event'] == WORKLOG and r['closed_at'] == cycle.closed_at.isoformat()
+               for r in logged)
+
+
+def has_children(root, issue):
+    for issues_file in (root / 'epics').glob('*/issues.json'):
+        for record in json.loads(issues_file.read_text()).get('issues', []):
+            if issue in (record.get('parent_key'), (record.get('parent') or {}).get('key')):
+                return True
+    return False
+
+
+def in_progress_moment(root, issue, cycle, jira_in_progress_at):
+    """The applied start of the cycle, or the Jira history time when that start was skipped."""
+    applied_starts = [t for t in completion_times(root, issue, 'start', 'applied') if cycle.contains(t)]
+    if applied_starts:
+        if jira_in_progress_at:
+            raise ValueError(f'{issue} has an applied start; --in-progress-at is only for a skipped start')
+        return applied_starts[-1], 'applied start'
+    if not any(cycle.contains(t) for t in completion_times(root, issue, 'start', 'skipped')):
+        raise ValueError(f'{issue} needs an applied or skipped start update before its worklog')
+    if jira_in_progress_at is None:
+        raise ValueError(f'{issue} had its start skipped; pass --in-progress-at from the Jira history')
+    if not cycle.contains(jira_in_progress_at):
+        raise ValueError('--in-progress-at must fall after the previous Closed and not after this Closed')
+    return jira_in_progress_at, 'jira history'
 
 
 def machine_hours(in_progress_at, closed_at):
     elapsed = (closed_at - in_progress_at).total_seconds()
-    if elapsed < 0:
-        raise ValueError('Closed precedes In Progress')
     return max(1, math.ceil(elapsed / SECONDS_PER_HOUR))
 
 
@@ -77,27 +123,36 @@ def transition_effect(event):
     return {'target_status': TARGET_STATUS[event], 'assign_current_user': event == 'start'}
 
 
-def worklog_effect(root, issue):
-    if has_worklog(root, issue):
-        raise ValueError(f'{issue} already has a pending or applied worklog')
-    starts, closes = applied(root, issue, 'start'), applied(root, issue, 'verified')
-    if not starts or not closes:
-        raise ValueError(f'{issue} needs an applied start and an applied verified update before its worklog')
-    in_progress_at = min(datetime.fromisoformat(r['completed_at']) for r in starts)
-    closed_at = max(datetime.fromisoformat(r['completed_at']) for r in closes)
-    return {'time_spent': f'{machine_hours(in_progress_at, closed_at)}h',
+def worklog_effect(root, issue, jira_in_progress_at):
+    if has_children(root, issue):
+        raise ValueError(f'{issue} is a parent issue; its children carry the worklogs')
+    cycle = last_closed_cycle(root, issue)
+    if has_worklog(root, issue, cycle):
+        raise ValueError(f'{issue} already has a pending or applied worklog for this Closed')
+    in_progress_at, source = in_progress_moment(root, issue, cycle, jira_in_progress_at)
+    return {'time_spent': f'{machine_hours(in_progress_at, cycle.closed_at)}h',
             'started': in_progress_at.strftime(JIRA_STARTED_FORMAT),
-            'in_progress_at': in_progress_at.isoformat(), 'closed_at': closed_at.isoformat()}
+            'in_progress_at': in_progress_at.isoformat(), 'in_progress_source': source,
+            'closed_at': cycle.closed_at.isoformat()}
 
 
-def queue(root, issue, event, ref=''):
+def queue(root, issue, event, ref='', jira_in_progress_at=None):
     if event not in EVENTS:
         raise ValueError(f'Unknown event {event}')
-    effect = worklog_effect(root, issue) if event == WORKLOG else transition_effect(event)
+    if event != WORKLOG and jira_in_progress_at:
+        raise ValueError('--in-progress-at applies to the worklog event only')
+    effect = worklog_effect(root, issue, jira_in_progress_at) if event == WORKLOG else transition_effect(event)
     request = {'id': str(uuid.uuid4()), 'issue': issue, 'event': event, **effect,
                'ref': ref, 'queued_at': now()}
     write_atomic(root / 'jira-sync' / 'pending' / f"{request['id']}.json", request)
     return request
+
+
+def jira_history_time(text):
+    moment = datetime.fromisoformat(text)
+    if moment.tzinfo is None:
+        raise ValueError('--in-progress-at needs a UTC offset')
+    return moment.astimezone(timezone.utc)
 
 
 def record_source_status(root, issue, status, synced_at):
@@ -126,7 +181,7 @@ def done(root, request_id, outcome, detail):
     return request
 
 
-def main():
+def run():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--root', type=Path, required=True)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -134,6 +189,7 @@ def main():
     queue_cmd.add_argument('--issue', required=True)
     queue_cmd.add_argument('--event', required=True, choices=sorted(EVENTS))
     queue_cmd.add_argument('--ref', default='')
+    queue_cmd.add_argument('--in-progress-at', type=jira_history_time)
     commands.add_parser('pending')
     done_cmd = commands.add_parser('done')
     done_cmd.add_argument('--id', required=True)
@@ -141,12 +197,19 @@ def main():
     done_cmd.add_argument('--detail', required=True)
     args = parser.parse_args()
     if args.command == 'queue':
-        result = queue(args.root, args.issue, args.event, args.ref)
+        result = queue(args.root, args.issue, args.event, args.ref, args.in_progress_at)
     elif args.command == 'pending':
         result = pending(args.root)
     else:
         result = done(args.root, args.id, args.outcome, args.detail)
     print(json.dumps(result, indent=2))
+
+
+def main():
+    try:
+        run()
+    except ValueError as error:
+        sys.exit(f'jira_sync: {error}')
 
 
 if __name__ == '__main__':
