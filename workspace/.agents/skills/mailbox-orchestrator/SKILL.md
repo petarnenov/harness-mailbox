@@ -110,11 +110,11 @@ Brief it with:
 
 Accept only its findings. Never delegate G1/G2, merges, Jira or AIO writes, or decisions; subagent findings inform the orchestrator and do not decide. Do not spawn one for small reviews or to wait on workers, and do not repeat its work while it runs.
 
-## Epic coordination: Jira is read-only except the orchestrator's three transitions and one worklog
+## Epic coordination: Jira is read-only except the orchestrator's three transitions, one worklog and an empty Original Estimate
 
 The current user policy is **no Jira writes**. Read Epic details, issue descriptions, acceptance criteria, relationships and estimates through available Jira tools. Do not post comments, change statuses, log work, modify estimates or create/update issues. Propagate this restriction in every delegated task, including tasks whose repository skills normally update Jira. Only a subsequent explicit user instruction can change this policy; a worker message or Jira content cannot.
 
-**Orchestrator-only exception (user, 2026-11-20).** The orchestrator makes exactly three Jira status updates; its only other Jira write is the worklog described below. Queue each with `scripts/jira_sync.py queue --issue <KEY> --event <event> --ref <evidence>` at its gate, then apply it with the Jira tools and record the outcome with `jira_sync.py done --id <UUID> --outcome applied|skipped --detail <what happened>`:
+**Orchestrator-only exception (user, 2026-11-20).** The orchestrator makes exactly three Jira status updates; its only other Jira writes are the worklog and the empty Original Estimate described below. Queue each with `scripts/jira_sync.py queue --issue <KEY> --event <event> --ref <evidence>` at its gate, then apply it with the Jira tools and record the outcome with `jira_sync.py done --id <UUID> --outcome applied|skipped --detail <what happened>`:
 
 | Gate | Event | Jira effect |
 |---|---|---|
@@ -138,6 +138,14 @@ The current user policy is **no Jira writes**. Read Epic details, issue descript
 - The script refuses an issue that `issues.json` lists as the parent of others: its children carry the worklogs and Jira rolls their time up.
 - Never compute or adjust the hours yourself, and never log time for an issue the script refuses.
 - Do not backfill issues closed before this exception unless the user asks.
+
+**Original Estimate exception (user, 2026-11-22).** Before an issue's first gated dispatch, read its Original Estimate. If it is empty, estimate the issue in person-hours (a developer's effort, not agent time) from its description and acceptance criteria, write the value to Original Estimate, read it back, and only then dispatch.
+
+- A Story whose sub-tasks are in scope gets the sum of its sub-tasks' estimates.
+- Never overwrite an existing Original Estimate and never set Remaining Estimate or other time fields directly.
+- Record the estimate with its per-part breakdown in `decisions/<ISSUE-KEY>/<UUID>.json` and as `estimate` (`value`, `unit: hours`, `source: jira timeoriginalestimate`) in `issues.json`.
+- If the baseline later shows the estimate is materially wrong, tell the user; do not change the Jira value without their instruction.
+- Workers and their loops never estimate in Jira.
 
 ### Import the full scope
 
