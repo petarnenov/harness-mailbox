@@ -264,6 +264,13 @@ class JiraSyncTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 jira_sync.queue(self.root, parent, 'worklog')
 
+    def test_command_line_without_a_root_uses_the_mailbox_of_the_script(self):
+        arguments = ['jira_sync.py', 'queue', '--issue', 'GEO-1', '--event', 'start']
+        with mock.patch.object(jira_sync, 'MAILBOX', self.root), mock.patch.object(jira_sync.sys, 'argv', arguments), \
+                mock.patch('builtins.print'):
+            jira_sync.main()
+        self.assertEqual(['GEO-1'], [request['issue'] for request in jira_sync.read_requests(self.root, 'pending')])
+
     def test_command_line_reports_a_refusal_in_one_line(self):
         arguments = ['jira_sync.py', '--root', str(self.root), 'queue', '--issue', 'GEO-1', '--event', 'worklog']
         with mock.patch.object(jira_sync.sys, 'argv', arguments), self.assertRaises(SystemExit) as refusal:

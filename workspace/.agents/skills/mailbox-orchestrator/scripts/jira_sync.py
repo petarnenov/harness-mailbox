@@ -2,11 +2,11 @@
 """Queue and record the Jira updates the orchestrator is allowed to make.
 
 Usage:
-  jira_sync.py --root <mailbox> queue --issue <KEY> --event start|pr|verified|worklog [--ref <text>]
+  jira_sync.py [--root <mailbox>] queue --issue <KEY> --event start|pr|verified|worklog [--ref <text>]
                                       [--in-progress-at <ISO time from the Jira history>]
                                       [--transcripts <folder of Claude Code session transcripts>]
-  jira_sync.py --root <mailbox> pending
-  jira_sync.py --root <mailbox> done --id <UUID> --outcome applied|skipped --detail <text>
+  jira_sync.py [--root <mailbox>] pending
+  jira_sync.py [--root <mailbox>] done --id <UUID> --outcome applied|skipped --detail <text>
 
 Events and their Jira effect (applied by the orchestrator through its Jira tools):
   start     assign to the user running the orchestrator, move to In Progress
@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import NamedTuple, Optional
 
 import agent_activity
+from mailbox_layout import mailbox_root
 
 TARGET_STATUS = {'start': 'In Progress', 'pr': 'Development Peer Review', 'verified': 'Closed'}
 WORKLOG = 'worklog'
@@ -49,6 +50,7 @@ EVENTS = (*TARGET_STATUS, WORKLOG)
 SECONDS_PER_HOUR = 3600
 JIRA_STARTED_FORMAT = '%Y-%m-%dT%H:%M:%S.000%z'
 TRANSCRIPTS = Path.home() / '.claude' / 'projects'
+MAILBOX = mailbox_root(__file__)
 ABANDONED_AFTER = timedelta(days=3)
 
 
@@ -270,7 +272,7 @@ def done(root, request_id, outcome, detail):
 
 def run():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--root', type=Path, required=True)
+    parser.add_argument('--root', type=Path, default=MAILBOX)
     commands = parser.add_subparsers(dest='command', required=True)
     queue_cmd = commands.add_parser('queue')
     queue_cmd.add_argument('--issue', required=True)

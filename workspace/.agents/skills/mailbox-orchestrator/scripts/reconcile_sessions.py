@@ -32,7 +32,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-MAILBOX = Path(__file__).resolve().parents[4]
+from mailbox_layout import mailbox_root
+
+MAILBOX = mailbox_root(__file__)
 ADDRESS_FIELDS = ('to_session_id', 'intended_endpoint', 'to_endpoint')
 
 

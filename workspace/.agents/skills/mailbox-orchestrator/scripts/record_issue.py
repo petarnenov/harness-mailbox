@@ -21,7 +21,9 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-MAILBOX = Path(__file__).resolve().parents[4]
+from mailbox_layout import mailbox_root
+
+MAILBOX = mailbox_root(__file__)
 
 
 def issues_path(root, epic):

@@ -39,7 +39,9 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-MAILBOX = Path(__file__).resolve().parents[4]
+from mailbox_layout import mailbox_root
+
+MAILBOX = mailbox_root(__file__)
 API = 'https://tcms-prod-us.aiojiraapps.com/aio-tcms/api/v1/project/GEO'
 CASE_TYPES = {'Functional': 3, 'API': 4, 'Performance': 5, 'Security': 6, 'UI': 12}
 PUBLISHED, AUTOMATED = 3, 4
