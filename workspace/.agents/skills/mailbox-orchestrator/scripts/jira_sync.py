@@ -2,7 +2,8 @@
 """Queue and record the Jira updates the orchestrator is allowed to make.
 
 Usage:
-  jira_sync.py [--root <mailbox>] queue --issue <KEY> --event start|pr|verified|worklog [--ref <text>]
+  jira_sync.py [--root <mailbox>] queue --issue <KEY> --event start|pr|verified|worklog|estimate [--ref <text>]
+                                      [--hours <person-hours, estimate only>]
                                       [--in-progress-at <ISO time from the Jira history>]
                                       [--transcripts <folder of Claude Code session transcripts>]
   jira_sync.py [--root <mailbox>] pending
@@ -14,6 +15,7 @@ Events and their Jira effect (applied by the orchestrator through its Jira tools
   pr        move to Development Peer Review (only work types that have it)
   verified  move to Closed
   worklog   log the agents' active hours from In Progress to Closed as one worklog
+  estimate  set an empty Original Estimate to the given person-hours, before the first dispatch
 
 The script never talks to Jira. It keeps a durable queue under jira-sync/pending
 and an audit trail under jira-sync/done, so a failed or skipped update stays visible.
@@ -31,6 +33,12 @@ When the cycle's `start` was skipped because Jira was already In Progress, the t
 that transition from the Jira history must be passed with --in-progress-at. The request
 is refused for a cycle that already has a pending or applied worklog, and for an issue
 that issues.json lists as the parent of others, whose children carry the worklogs.
+
+An estimate is the orchestrator's judgement of a developer's effort in person-hours, not agent
+time. The orchestrator reads Jira first and queues it only when Original Estimate is empty; a
+Jira value found at apply time is recorded as skipped, never overwritten. The request is
+refused for an issue that already has a pending or applied estimate. An applied estimate is
+copied into the issue's `estimate` in every epics/*/issues.json that lists it.
 
 `worked` changes nothing in Jira and queues nothing. It measures the same way the seconds the
 agents worked so far on every started issue, over all its stays in progress up to now, and
@@ -51,7 +59,8 @@ from mailbox_layout import mailbox_root
 
 TARGET_STATUS = {'start': 'In Progress', 'pr': 'Development Peer Review', 'verified': 'Closed'}
 WORKLOG = 'worklog'
-EVENTS = (*TARGET_STATUS, WORKLOG)
+ESTIMATE = 'estimate'
+EVENTS = (*TARGET_STATUS, WORKLOG, ESTIMATE)
 SECONDS_PER_HOUR = 3600
 JIRA_STARTED_FORMAT = '%Y-%m-%dT%H:%M:%S.000%z'
 TRANSCRIPTS = Path.home() / '.claude' / 'projects'
@@ -254,13 +263,30 @@ def worklog_effect(root, issue, jira_in_progress_at, transcripts_root):
             'closed_at': cycle.closed_at.isoformat()}
 
 
-def queue(root, issue, event, ref='', jira_in_progress_at=None, transcripts_root=None):
+def has_estimate(root, issue):
+    queued = pending(root) + [r for r in read_requests(root, 'done') if r['outcome'] == 'applied']
+    return any(r['issue'] == issue and r['event'] == ESTIMATE for r in queued)
+
+
+def estimate_effect(root, issue, hours):
+    if hours is None or hours <= 0:
+        raise ValueError('The estimate event needs --hours, a positive number of person-hours')
+    if has_estimate(root, issue):
+        raise ValueError(f'{issue} already has a pending or applied estimate; it is never overwritten')
+    return {'original_estimate': f'{hours:g}h', 'hours': hours, 'unit': 'person-hours'}
+
+
+def queue(root, issue, event, ref='', jira_in_progress_at=None, transcripts_root=None, hours=None):
     if event not in EVENTS:
         raise ValueError(f'Unknown event {event}')
     if event != WORKLOG and jira_in_progress_at:
         raise ValueError('--in-progress-at applies to the worklog event only')
+    if event != ESTIMATE and hours is not None:
+        raise ValueError('--hours applies to the estimate event only')
     if event == WORKLOG:
         effect = worklog_effect(root, issue, jira_in_progress_at, transcripts_root or TRANSCRIPTS)
+    elif event == ESTIMATE:
+        effect = estimate_effect(root, issue, hours)
     else:
         effect = transition_effect(event)
     request = {'id': str(uuid.uuid4()), 'issue': issue, 'event': event, **effect,
@@ -276,15 +302,27 @@ def jira_history_time(text):
     return moment.astimezone(timezone.utc)
 
 
-def record_source_status(root, issue, status, synced_at):
-    """Copy an applied Jira status into the local snapshots of every Epic that lists the issue."""
+def update_issue_records(root, issue, fields):
+    """Write fields into the issue's record in every Epic snapshot that lists it."""
     for issues_file in sorted((root / 'epics').glob('*/issues.json')):
         snapshot = json.loads(issues_file.read_text())
         records = [r for r in snapshot.get('issues', []) if r.get('key', r.get('issue_key')) == issue]
         for record in records:
-            record.update(source_status=status, source_status_synced_at=synced_at)
+            record.update(fields)
         if records:
             write_atomic(issues_file, snapshot)
+
+
+def record_source_status(root, issue, status, synced_at):
+    """Copy an applied Jira status into the local snapshots of every Epic that lists the issue."""
+    update_issue_records(root, issue, {'source_status': status, 'source_status_synced_at': synced_at})
+
+
+def record_estimate(root, issue, hours, applied_at):
+    """Copy an applied Original Estimate into the local snapshots of every Epic that lists the issue."""
+    update_issue_records(root, issue, {'estimate': {'value': float(hours), 'unit': 'hours',
+                                                    'source': 'jira timeoriginalestimate',
+                                                    'retrieved_at': applied_at}})
 
 
 def done(root, request_id, outcome, detail):
@@ -299,6 +337,8 @@ def done(root, request_id, outcome, detail):
     source.unlink()
     if outcome == 'applied' and request['event'] in TARGET_STATUS:
         record_source_status(root, request['issue'], request['target_status'], request['completed_at'])
+    if outcome == 'applied' and request['event'] == ESTIMATE:
+        record_estimate(root, request['issue'], request['hours'], request['completed_at'])
     return request
 
 
@@ -312,6 +352,7 @@ def run():
     queue_cmd.add_argument('--ref', default='')
     queue_cmd.add_argument('--in-progress-at', type=jira_history_time)
     queue_cmd.add_argument('--transcripts', type=Path)
+    queue_cmd.add_argument('--hours', type=float)
     commands.add_parser('pending')
     done_cmd = commands.add_parser('done')
     done_cmd.add_argument('--id', required=True)
@@ -321,7 +362,8 @@ def run():
     worked_cmd.add_argument('--transcripts', type=Path)
     args = parser.parse_args()
     if args.command == 'queue':
-        result = queue(args.root, args.issue, args.event, args.ref, args.in_progress_at, args.transcripts)
+        result = queue(args.root, args.issue, args.event, args.ref, args.in_progress_at, args.transcripts,
+                       args.hours)
     elif args.command == 'pending':
         result = pending(args.root)
     elif args.command == 'worked':

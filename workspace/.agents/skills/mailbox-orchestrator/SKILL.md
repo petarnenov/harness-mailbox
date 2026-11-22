@@ -139,11 +139,11 @@ The current user policy is **no Jira writes**. Read Epic details, issue descript
 - Never compute or adjust the hours yourself, and never log time for an issue the script refuses.
 - Do not backfill issues closed before this exception unless the user asks.
 
-**Original Estimate exception (user, 2026-11-22).** Before an issue's first gated dispatch, read its Original Estimate. If it is empty, estimate the issue in person-hours (a developer's effort, not agent time) from its description and acceptance criteria, write the value to Original Estimate, read it back, and only then dispatch.
+**Original Estimate exception (user, 2026-11-22).** Before an issue's first gated dispatch, read its Original Estimate. If it is empty, estimate the issue in person-hours (a developer's effort, not agent time) from its description and acceptance criteria and queue it with `jira_sync.py queue --issue <KEY> --event estimate --hours <N> --ref <decision path>`. Apply it by setting Original Estimate to the request's `original_estimate`, read it back, record `jira_sync.py done --outcome applied`, and only then dispatch. If Jira already holds a value when you apply it, record `skipped` with that value.
 
 - A Story whose sub-tasks are in scope gets the sum of its sub-tasks' estimates.
-- Never overwrite an existing Original Estimate and never set Remaining Estimate or other time fields directly.
-- Record the estimate with its per-part breakdown in `decisions/<ISSUE-KEY>/<UUID>.json` and as `estimate` (`value`, `unit: hours`, `source: jira timeoriginalestimate`) in `issues.json`.
+- Never overwrite an existing Original Estimate and never set Remaining Estimate or other time fields directly; the script refuses a second pending or applied estimate for the same issue.
+- Record the per-part breakdown in `decisions/<ISSUE-KEY>/<UUID>.json` and pass it as `--ref`. An applied `done` copies the value into the issue's `estimate` in `issues.json`.
 - If the baseline later shows the estimate is materially wrong, tell the user; do not change the Jira value without their instruction.
 - Workers and their loops never estimate in Jira.
 

@@ -313,6 +313,47 @@ class JiraSyncTest(unittest.TestCase):
         jira_sync.done(self.root, worklog['id'], 'applied', 'worklog 10001')
         self.assertEqual({'GEO-1': 'Closed'}, self.statuses(issues))
 
+    def test_estimate_queues_person_hours_for_original_estimate(self):
+        request = jira_sync.queue(self.root, 'GEO-1', 'estimate', hours=6)
+        self.assertEqual('6h', request['original_estimate'])
+        self.assertEqual('person-hours', request['unit'])
+        self.assertNotIn('target_status', request)
+        self.assertEqual([request], jira_sync.pending(self.root))
+
+    def test_estimate_needs_positive_hours_and_hours_need_the_estimate_event(self):
+        for hours in (None, 0, -2):
+            with self.assertRaises(ValueError):
+                jira_sync.queue(self.root, 'GEO-1', 'estimate', hours=hours)
+        with self.assertRaises(ValueError):
+            jira_sync.queue(self.root, 'GEO-1', 'start', hours=6)
+
+    def test_estimate_is_never_queued_twice_unless_it_was_skipped(self):
+        skipped = jira_sync.queue(self.root, 'GEO-1', 'estimate', hours=6)
+        jira_sync.done(self.root, skipped['id'], 'skipped', 'Original Estimate already set in Jira')
+        retried = jira_sync.queue(self.root, 'GEO-1', 'estimate', hours=5)
+        with self.assertRaises(ValueError):
+            jira_sync.queue(self.root, 'GEO-1', 'estimate', hours=7)
+        jira_sync.done(self.root, retried['id'], 'applied', 'originalEstimate 5h read back')
+        with self.assertRaises(ValueError):
+            jira_sync.queue(self.root, 'GEO-1', 'estimate', hours=7)
+
+    def test_applied_estimate_reaches_the_issue_snapshot_and_keeps_its_status(self):
+        issues = self.write_issues('E-1', {'key': 'GEO-1', 'source_status': 'To Do'},
+                                   {'key': 'GEO-2', 'source_status': 'To Do'})
+        request = jira_sync.queue(self.root, 'GEO-1', 'estimate', hours=1.5)
+        jira_sync.done(self.root, request['id'], 'applied', 'originalEstimate 1.5h read back')
+        records = {r['key']: r for r in json.loads(issues.read_text())['issues']}
+        self.assertEqual({'value': 1.5, 'unit': 'hours', 'source': 'jira timeoriginalestimate'},
+                         {k: v for k, v in records['GEO-1']['estimate'].items() if k != 'retrieved_at'})
+        self.assertNotIn('estimate', records['GEO-2'])
+        self.assertEqual({'GEO-1': 'To Do', 'GEO-2': 'To Do'}, self.statuses(issues))
+
+    def test_skipped_estimate_leaves_the_snapshot_unchanged(self):
+        issues = self.write_issues('E-1', {'key': 'GEO-1', 'source_status': 'To Do'})
+        request = jira_sync.queue(self.root, 'GEO-1', 'estimate', hours=6)
+        jira_sync.done(self.root, request['id'], 'skipped', 'Original Estimate already set in Jira')
+        self.assertNotIn('estimate', json.loads(issues.read_text())['issues'][0])
+
     def test_unknown_event_is_rejected(self):
         with self.assertRaises(ValueError):
             jira_sync.queue(self.root, 'GEO-1', 'reopen')
