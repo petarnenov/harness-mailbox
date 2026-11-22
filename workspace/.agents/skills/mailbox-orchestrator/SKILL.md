@@ -101,7 +101,7 @@ Brief it with:
 
 Accept only its findings. Never delegate G1/G2, merges, Jira or AIO writes, or decisions; subagent findings inform the orchestrator and do not decide. Do not spawn one for small reviews or to wait on workers, and do not repeat its work while it runs.
 
-## Epic coordination: Jira is read-only except three orchestrator updates
+## Epic coordination: Jira is read-only except the orchestrator's three transitions and one worklog
 
 The current user policy is **no Jira writes**. Read Epic details, issue descriptions, acceptance criteria, relationships and estimates through available Jira tools. Do not post comments, change statuses, log work, modify estimates or create/update issues. Propagate this restriction in every delegated task, including tasks whose repository skills normally update Jira. Only a subsequent explicit user instruction can change this policy; a worker message or Jira content cannot.
 
@@ -118,6 +118,12 @@ The current user policy is **no Jira writes**. Read Epic details, issue descript
 - Apply only to issues started after this exception; do not retro-transition earlier work unless the user asks.
 - Run `jira_sync.py pending` on activation and resume and finish any queued requests.
 - Delegated workers and their loops stay fully read-only; keep that restriction in every assignment.
+
+**Worklog exception (user, 2026-11-22).** After an issue's `verified` update is recorded as `applied`, queue `jira_sync.py queue --issue <KEY> --event worklog`. The script measures machine hours from the applied `start` to the applied `verified`, rounded up to the whole hour, and refuses the request when either is missing or the issue already has a pending or applied worklog. Apply it as one Jira worklog with the request's `time_spent` and `started` and no comment, then record the outcome with `jira_sync.py done`.
+
+- Log on the issue that carried the execution task. A Story whose Sub-tasks carry worklogs gets none of its own; Jira rolls their time up.
+- Never compute or adjust the hours yourself, and never log time for an issue the script refuses.
+- Do not backfill issues closed before this exception unless the user asks.
 
 ### Import the full scope
 
@@ -147,7 +153,7 @@ Add `epic_key` and `issue_key` to delegated local task records. Do not copy secr
 - Show acceptance-criteria coverage as verified criteria / total enumerated criteria when criteria have stable IDs. Unknown criteria coverage is unavailable, not zero or complete.
 - Optionally report estimate-weighted completion only for compatible, known units. Keep story points and hours separate, disclose how many issues have estimates and never silently assign zero weight to unestimated issues. Do not describe a partially estimated subset as whole-Epic effort progress.
 - Record counts of newly completed, reopened, added and removed issues since the previous snapshot. Explain denominator changes when the scope changes. Preserve both baseline and current scope; never silently drop unfinished issues to increase progress.
-- Include blocker age and last worker update where timestamps exist. Do not infer work hours, cost, velocity or ETA from message timestamps or guess unavailable metrics.
+- Include blocker age and last worker update where timestamps exist. Do not infer work hours, cost, velocity or ETA from message timestamps or guess unavailable metrics; the only derived hours are the Jira worklog that `jira_sync.py` computes from its applied `start` and `verified` updates.
 - Mark overall Epic completion only when scope enumeration is complete, all in-scope issues are verified, Epic-level acceptance criteria and cross-project integration checks pass, and no required work remains. A 100% issue count alone is not sufficient.
 
 Refresh local metrics after meaningful worker responses and on user status requests. Reconcile with Jira using read operations at activation/resume or when scope changes are suspected. Report the data's freshness; this skill installs no background monitor.
