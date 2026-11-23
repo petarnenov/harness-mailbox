@@ -34,10 +34,32 @@ htmlcov/
 /deliveries/
 /jira-sync/
 /reports/
-/AGENTS.md
 
 # Make workflow coverage artifacts
 .coverage-output/
 
 # Workspace instructions and skills are tracked under workspace/
 !/workspace/.claude/
+
+# Delivery package (da.*): canonical skills, agents and hooks are tracked; run history stays local
+!/.claude/
+/.claude/*
+!/.claude/skills/
+!/.claude/agents/
+!/.claude/hooks/
+/.claude/agents/*
+!/.claude/agents/da-*.md
+/.claude/hooks/*
+!/.claude/hooks/path-guard.py
+/.claude/skills/*
+!/.claude/skills/da.*/
+!/.claude/skills/da-*/
+!/.codex/
+/.codex/*
+!/.codex/hooks.json
+!/.codex/config.toml
+!/.codex/agents/
+
+# Local provenance and source archives
+/.claude/skills/*/references/*-origin/
+/.claude/skills/*/references/upstream.json
