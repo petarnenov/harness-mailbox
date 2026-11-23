@@ -110,7 +110,9 @@ The sticky header contains five page tabs: **Overview**, **Dependencies**, **Tas
 
 ## Agent compatibility
 
-The dashboard is independent of the agent host. Codex, Claude Code, GitHub Copilot or another local tool can produce the same JSON snapshots using the contract below; the application only reads files. Host-specific session discovery and messaging are not bundled with this repository; the workspace skills describe them per host. The displayed agent effort model is a planning convention, not a connection to an agent or billing API.
+The dashboard is independent of the agent host. Codex, Claude Code, GitHub Copilot or another local tool can produce the same JSON snapshots using the contract below; the application only reads files. The workspace skills define discovery and message delivery for each host. The displayed agent effort model is a planning convention, not a connection to an agent or billing API.
+
+The workspace template includes two Copilot CLI profiles. Install `workspace/.github/agents/mailbox-*.agent.md` under the mailbox's `.github/agents/` alongside the standard workspace skills. Follow the [two-terminal Copilot walkthrough](workspace/.agents/skills/mailbox-orchestrator/references/host-adapters.md#starting-copilot-cli) to start both roles, register the exact worker session and verify a read-only task through its receipts and reply.
 
 ## Snapshot contract
 
