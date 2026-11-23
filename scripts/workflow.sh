@@ -21,10 +21,18 @@ dashboard_state() {
     # one-off containers for this service without publishing the dashboard port.
     details=$("$DOCKER" ps --all --filter "label=com.docker.compose.project=$PROJECT_NAME" \
         --filter label=com.docker.compose.service=dashboard --filter label=com.docker.compose.oneoff=False \
-        --format '{{.State}} {{.Label "com.docker.compose.project.working_dir"}}') || return 1
+        --format '{{.ID}} {{.State}} {{.Label "com.docker.compose.project.working_dir"}}') || return 1
     if [ -n "$details" ]; then
-        [ "${details#* }" -ef "$APP_DIR" ] || fail 'Dashboard container belongs to another Compose directory.'
-        printf '%s\n' "${details%% *}"
+        container=${details%% *}
+        state_and_owner=${details#* }
+        [ "${state_and_owner#* }" -ef "$APP_DIR" ] || fail 'Dashboard container belongs to another Compose directory.'
+        if [ -n "${team_root:-}" ]; then
+            # The client path label works across WSL/Docker Desktop VM boundaries.
+            # Older containers can still be recognized by their existing bind mount.
+            mount=$("$DOCKER" inspect --format '{{with index .Config.Labels "io.harness-mailbox.root"}}{{.}}{{else}}{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}{{end}}' "$container") || return 1
+            [ "$mount" -ef "$team_root" ] || fail 'The dashboard is configured for another mailbox.'
+        fi
+        printf '%s\n' "${state_and_owner%% *}"
     fi
 }
 
@@ -158,7 +166,11 @@ case "${1:-help}" in
     build) doctor_deps; doctor_config; compose build ;;
     up) doctor_deps; doctor_config; compose up -d --build --wait ;;
     ensure-dashboard)
-        if [ ! -e .env ] && [ -z "${MAILBOX_ROOT:-}" ]; then
+        team_root=${2:-}
+        if [ -n "$team_root" ]; then
+            MAILBOX_ROOT=$team_root
+            export MAILBOX_ROOT
+        elif [ ! -e .env ] && [ -z "${MAILBOX_ROOT:-}" ]; then
             MAILBOX_ROOT=$(detect_mailbox_root)
             export MAILBOX_ROOT
         fi

@@ -7,6 +7,7 @@ import re
 import runpy
 import stat
 import subprocess
+import tempfile
 import uuid
 
 
@@ -15,6 +16,86 @@ SESSION_IDENTITY = "#{session_id}|#{pid}|#{session_created}|#{session_name}|#{@m
 IDENTITY = "#{session_id}|#{pid}|#{session_created}|#{pane_pid}|#{@mailbox_team_token}|#{@mailbox_pane_token}|#{@copilot_route}|#{@mailbox_initial_pid}"
 FORMAT = ("#{session_id}|#{pane_id}|#{pane_dead}|#{@copilot_route}|#{@copilot_projects}|"
           "#{@mailbox_team_token}|#{@mailbox_pane_token}|#{pid}|#{session_created}|#{pane_pid}|#{@mailbox_initial_pid}")
+SOCKET_RECORD = ".copilot-mailbox-tmux-socket"
+_RECORDED_SOCKET = object()
+
+
+def verify_socket(path):
+    if not os.path.isabs(path):
+        raise ValueError("Could not verify this team's tmux server.")
+    info = os.lstat(path)
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+        raise ValueError("Could not verify this team's tmux server.")
+
+
+def team_socket(root):
+    """A server is shared by its socket; session and pane IDs are local to that server."""
+    try:
+        fd = os.open(Path(root) / SOCKET_RECORD, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as source:
+            info = os.fstat(source.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022
+                    or not 0 < info.st_size <= 4096):
+                raise ValueError("Could not verify this team's tmux server.")
+            path = os.fsdecode(source.read(4097))
+            if len(os.fsencode(path)) != info.st_size or "\x00" in path:
+                raise ValueError("Could not verify this team's tmux server.")
+        verify_socket(path)
+        return path
+    except FileNotFoundError:
+        # Older teams have no record, and tmux removes the socket of a retired server.
+        return None
+
+
+def remember_socket(root, path):
+    verify_socket(path)
+    with tempfile.NamedTemporaryFile(dir=root, prefix=".team-socket-", delete=False) as stream:
+        try:
+            stream.write(os.fsencode(path))
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.replace(stream.name, Path(root) / SOCKET_RECORD)
+        finally:
+            Path(stream.name).unlink(missing_ok=True)
+
+
+def tmux_client(socket):
+    return ["tmux", "-S", socket] if socket else ["tmux"]
+
+
+def attach(socket, pane, identity, *, focus_only=False):
+    """Check the observed coordinator in the same tmux client that changes focus."""
+    fields = identity.split("|")
+    if len(fields) != 8 or not re.fullmatch(r"%[0-9]+", pane):
+        raise ValueError("The team connection changed. Reopen team to refresh its status.")
+    session, server, created, pid, token, marker, role, pinned = fields
+    if (not re.fullmatch(r"\$[0-9]+", session) or not all(re.fullmatch(r"[0-9]+", n) for n in (server, created, pid))
+            or role != "orchestrator" or token != marker or (token and not re.fullmatch(r"[0-9a-f]{32}", token))
+            or (pinned and pinned != pid)):
+        raise ValueError("The team connection changed. Reopen team to refresh its status.")
+    condition = "#{==:" + IDENTITY + "," + identity + "}"
+    # if-shell parses its command body. Only the validated numeric tmux IDs enter it.
+    commands = f"select-window -t {pane} ; select-pane -t {pane}"
+    changed = "The team connection changed. Reopen team to refresh its status."
+    client = [*tmux_client(socket), "if-shell", "-F", "-t", pane, condition]
+    rejected = "display-message -p '" + changed + "'"
+    if focus_only:
+        result = subprocess.run([*client, commands, rejected], capture_output=True, check=True, timeout=2)
+        if result.stdout.strip():
+            raise ValueError(changed)
+        return
+    current = os.environ.get("TMUX", "").rsplit(",", 2)[0]
+    nested = bool(current)
+    if current and socket:
+        try:
+            nested = os.path.samefile(current, socket)
+        except OSError:
+            nested = False
+        if not nested:
+            os.environ.pop("TMUX", None)
+            os.environ.pop("TMUX_PANE", None)
+    action = "switch-client" if nested else "attach-session"
+    os.execvp("tmux", [*client, commands + f" ; {action} -t '{session}'", rejected])
 
 
 def coordinator_locked(root):
@@ -45,12 +126,14 @@ def parse_roster(roster):
     return tuple(ordered)
 
 
-def managed_team(root, *, include_retired=False):
+def managed_team(root, *, include_retired=False, socket=_RECORDED_SOCKET):
     """Return live pane identities and the intended roster, including stopped workers."""
     root = Path(root).resolve()
     try:
         name = runpy.run_path(str(TEAM))["session_name"](root)
-        result = subprocess.run(["tmux", "list-panes", "-s", "-t", "=" + name + ":", "-F", FORMAT],
+        if socket is _RECORDED_SOCKET:
+            socket = team_socket(root)
+        result = subprocess.run([*tmux_client(socket), "list-panes", "-s", "-t", "=" + name + ":", "-F", FORMAT],
                                 capture_output=True, text=True, check=True, timeout=2)
         panes = {}
         owned = {}
@@ -88,7 +171,7 @@ def managed_team(root, *, include_retired=False):
             return None
         if not token and (foreign or "orchestrator" not in panes or not coordinator_locked(root)):
             return None
-        return {"projects": projects, "panes": panes, "session": session, "token": token,
+        return {"projects": projects, "panes": panes, "session": session, "token": token, "socket": socket,
                 "session_identity": "|".join((session, server, created, name, token)),
                 "owned": owned, "identities": identities, "foreign": foreign, "can_stop": bool(token and all_pinned)}
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -115,11 +198,11 @@ def stop_managed(root, expected, role=None):
                 raise ValueError("The selected worker is no longer running.")
             # Evaluate ownership inside tmux as well. A pane can be moved by an external client
             # between the snapshot and this command. Kill only the individually verified panes.
-            commands = ["tmux"]
+            commands = tmux_client(current["socket"])
             for participant in roles:
                 pane = owned[participant]
                 condition = "#{==:" + IDENTITY + "," + current["identities"][pane] + "}"
-                if len(commands) > 1:
+                if participant != roles[0]:
                     commands.append(";")
                 commands.extend(["if-shell", "-F", "-t", pane, condition, "kill-pane -t " + pane,
                                  "display-message -p changed"])
@@ -136,12 +219,13 @@ def release_surviving_session(team):
     # Closing the last managed pane normally also closes the session. An unowned pane
     # can still be present or be added during shutdown; leave it running under a fresh name.
     target = team["session"]
-    if subprocess.run(["tmux", "has-session", "-t", target], capture_output=True, timeout=2).returncode:
+    client = tmux_client(team.get("socket"))
+    if subprocess.run([*client, "has-session", "-t", target], capture_output=True, timeout=2).returncode:
         return
     released = "mailbox-released-" + uuid.uuid4().hex
     condition = "#{==:" + SESSION_IDENTITY + "," + team["session_identity"] + "}"
     command = "rename-session -t '" + target + "' " + released
-    result = subprocess.run(["tmux", "if-shell", "-F", "-t", target, condition, command,
+    result = subprocess.run([*client, "if-shell", "-F", "-t", target, condition, command,
                              "display-message -p changed"], capture_output=True, text=True, check=True, timeout=2)
     if result.stdout.strip():
         raise ValueError("The team changed while releasing its tmux session name. Check the open sessions.")

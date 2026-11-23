@@ -1,11 +1,18 @@
 """Regression cases at the participant CLI and tmux process boundaries."""
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 from pathlib import Path
+import pty
 import runpy
 import shutil
+import struct
 import subprocess
+import sys
+import time
 import tempfile
+import termios
 import unittest
 import uuid
 from unittest.mock import patch
@@ -56,6 +63,26 @@ class RuntimeAuditTests(unittest.TestCase):
         self.assertIn('Could not open', outcome.stderr)
         self.assertNotIn('Traceback', outcome.stderr)
 
+    def test_standalone_coordinator_rejects_invalid_registry_before_initialization(self):
+        for data in (None, 'invalid', {'projects': None}, {'projects': 1}):
+            with self.subTest(data=data):
+                (self.root / 'projects.json').write_text(json.dumps(data))
+                outcome = self.launch('orchestrator')
+                self.assertNotEqual(outcome.returncode, 0)
+                self.assertEqual(outcome.stdout, '')
+                self.assertIn('Could not open', outcome.stderr)
+                self.assertNotIn('Traceback', outcome.stderr)
+                for name in ('inbox', 'sessions', 'tasks', '.copilot-mailbox-orchestrator.lock'):
+                    self.assertFalse((self.root / name).exists(), name)
+
+    def test_standalone_coordinator_accepts_empty_legacy_and_wrapped_registries(self):
+        for data in ([], {}, {'projects': []}, {'projects': {}}):
+            with self.subTest(data=data):
+                (self.root / 'projects.json').write_text(json.dumps(data))
+                outcome = self.launch('orchestrator')
+                self.assertEqual(outcome.returncode, 0, outcome.stderr)
+                self.assertEqual(outcome.stdout.strip(), 'orchestrator')
+
     def test_registry_for_a_missing_user_fails_without_exposing_filesystem_details(self):
         missing_home = '~missing-account-' + uuid.uuid4().hex
         (self.root / 'projects.json').write_text(json.dumps([{'id': 'app', 'working_directory': missing_home}]))
@@ -74,6 +101,241 @@ class RuntimeAuditTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 2)
                     self.assertIn('See --help', result.stderr)
                     self.assertNotIn('private-placeholder', result.stderr)
+
+    def test_native_coordinator_prompt_includes_only_selected_project_ids(self):
+        entries = [{'id': name, 'working_directory': str(self.project)} for name in ('north-route', 'east-route')]
+        (self.root / 'projects.json').write_text(json.dumps(entries))
+        for harness in ('claude', 'codex'):
+            provider = self.base / harness
+            provider.write_text('#!' + sys.executable + '\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n')
+            provider.chmod(0o755)
+            for selected, other in (('north-route', 'east-route'), ('east-route', 'north-route')):
+                with self.subTest(harness=harness, selected=selected):
+                    outcome = self.launch('orchestrator', '--harness', harness, '--project', selected)
+                    self.assertEqual(outcome.returncode, 0, outcome.stderr)
+                    argv = json.loads(outcome.stdout)
+                    self.assertIn(selected, argv[-1])
+                    self.assertNotIn(other, argv[-1])
+                    if harness == 'codex':
+                        self.assertNotIn('--add-dir', argv)
+
+    @contextmanager
+    def isolated_tmux(self, prefix='tmux-', locale='en_US.UTF-8'):
+        with tempfile.TemporaryDirectory(prefix=prefix, dir='/tmp') as sockets:
+            env = {'PATH': self.env['PATH'], 'HOME': str(self.base), 'SHELL': '/bin/sh',
+                   'TMUX_TMPDIR': sockets, 'TERM': 'xterm', 'LC_ALL': locale}
+            with (patch.dict(os.environ, env, clear=True), patch.dict(sys.modules),
+                  patch.object(sys, 'path', [str(self.plugin), *sys.path])):
+                # The fixture's modules carry paths to a mailbox removed at test teardown.
+                sys.modules.pop('team_control', None)
+                sys.modules.pop('team_ui_data', None)
+                def command(*args, check=True):
+                    return subprocess.run(['tmux', *args], text=True, capture_output=True, check=check, timeout=5)
+                try:
+                    yield command
+                finally:
+                    for server in ('default', 'fixture-other'):
+                        command('-L', server, 'kill-server', check=False)
+
+    @unittest.skipUnless(shutil.which('tmux'), 'requires tmux')
+    def test_fresh_roles_use_callers_provider_profile_with_an_older_tmux_server(self):
+        real_tmux = shutil.which('tmux')
+        with self.isolated_tmux() as tmux:
+            # Observe only the synthetic environment installed by this fixture.
+            proxy = self.base / 'tmux'
+            proxy.write_text(
+                '#!' + sys.executable + '\nimport os, sys, json\n'
+                'with open(os.path.join(os.environ["HOME"], "tmux-args"), "a") as f:\n'
+                '    f.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+                f'os.execv({real_tmux!r}, [{real_tmux!r}, *sys.argv[1:]])\n')
+            proxy.chmod(0o755)
+            os.environ.update(CODEX_HOME='earlier-profile', CLAUDE_CONFIG_DIR='removed-profile')
+            tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'preexisting', 'sleep', '120')
+            os.environ.update(CODEX_HOME='chosen-profile', OPENAI_API_KEY='synthetic-account-secret')
+            del os.environ['CLAUDE_CONFIG_DIR']
+            for harness in ('codex', 'claude'):
+                provider = self.base / harness
+                provider.write_text(
+                    '#!' + sys.executable + '\nimport json, os, pathlib, sys, time\n'
+                    'record = pathlib.Path(os.environ["HOME"]) / os.environ["HARNESS_MAILBOX_ROUTE"]\n'
+                    'record.write_text(json.dumps([os.getenv("CODEX_HOME"), os.getenv("CLAUDE_CONFIG_DIR"), sys.argv]))\n'
+                    'time.sleep(120)\n')
+                provider.chmod(0o755)
+            api = runpy.run_path(str(self.plugin / 'team'))
+            settings = api['RoleSettings']
+            api['setup_team'](self.root, ['app'], settings('codex', None, None), settings('claude', None, None))
+            for route in ('orchestrator', 'app'):
+                record = self.base / route
+                deadline = time.monotonic() + 4
+                while not record.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                profile, removed, argv = json.loads(record.read_text())
+                with self.subTest(route=route):
+                    self.assertEqual(profile, 'chosen-profile')
+                    self.assertIsNone(removed)
+                    self.assertNotIn('synthetic-account-secret', json.dumps(argv))
+            self.assertNotIn('synthetic-account-secret', (self.base / 'tmux-args').read_text())
+
+    @contextmanager
+    def terminal_client(self, argv):
+        # A real controlling terminal lets tmux take or reject stdin exactly as the operator sees it.
+        pid, master = pty.fork()
+        if pid == 0:
+            try:
+                fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack('HHHH', 32, 120, 0, 0))
+                os.execvpe(argv[0], argv, os.environ.copy())
+            finally:
+                os._exit(125)
+        try:
+            yield pid
+        finally:
+            os.close(master)
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0] == 0:
+                    os.kill(pid, 15)
+                    os.waitpid(pid, 0)
+            except (ChildProcessError, ProcessLookupError):
+                pass
+
+    def client_session(self, tmux, socket_path, pid):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            clients = tmux('-S', socket_path, 'list-clients', '-F', '#{session_name}', check=False)
+            if clients.returncode == 0 and clients.stdout.strip():
+                return clients.stdout.strip()
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                return None
+            time.sleep(0.025)
+        self.fail('The terminal client neither attached nor exited')
+
+    @unittest.skipUnless(shutil.which('tmux'), 'requires tmux')
+    def test_cli_rejects_a_new_server_reusing_the_observed_socket_session_and_name(self):
+        with self.isolated_tmux() as tmux:
+            (self.base / 'copilot').write_text('#!/bin/sh\nexec sleep 120\n')
+            api = runpy.run_path(str(self.plugin / 'team'))
+            selection = api['session_name'](self.root)
+
+            def restart_server(program, argv):
+                before = tmux('display-message', '-p', '-t', '=' + selection + ':',
+                              '#{socket_path}|#{session_id}|#{pid}').stdout.strip()
+                socket_path, original_id, original_pid = before.split('|')
+                tmux('-S', socket_path, 'kill-server')
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if tmux('-S', socket_path, 'has-session', check=False).returncode:
+                        break
+                    time.sleep(0.02)
+                tmux('-S', socket_path, '-f', '/dev/null', 'new-session', '-d', '-s', selection, 'sleep', '120')
+                new_id, new_pid = tmux('-S', socket_path, 'display-message', '-p', '-t', '=' + selection + ':',
+                                       '#{session_id}|#{pid}').stdout.strip().split('|')
+                self.assertEqual(new_id, original_id)
+                self.assertNotEqual(new_pid, original_pid)
+                with self.terminal_client(argv) as pid:
+                    self.assertIsNone(self.client_session(tmux, socket_path, pid))
+
+            with (patch.object(sys.stdin, 'isatty', return_value=True),
+                  patch.object(sys, 'argv', ['team', 'app']), patch('os.execvp', side_effect=restart_server) as attach):
+                api['main']()
+            attach.assert_called_once()
+
+    @unittest.skipUnless(shutil.which('tmux'), 'requires tmux')
+    def test_plain_terminal_can_reconnect_and_stop_team_created_on_another_socket(self):
+        with self.isolated_tmux() as tmux:
+            tmux('-L', 'fixture-other', '-f', '/dev/null', 'new-session', '-d', '-s', 'unrelated', 'sleep', '120')
+            os.environ['TMUX'] = tmux('-L', 'fixture-other', 'display-message', '-p',
+                                      '#{socket_path},#{pid},0').stdout.strip()
+            (self.base / 'copilot').write_text('#!/bin/sh\nexec sleep 120\n')
+            api = runpy.run_path(str(self.plugin / 'team'))
+            role = api['RoleSettings']('copilot', 'auto', None)
+            name = api['setup_team'](self.root, ['app'], role, role)
+            del os.environ['TMUX']
+            data = runpy.run_path(str(self.plugin / 'team_ui_data.py'))
+            current = data['managed_team'](self.root)
+            self.assertIsNotNone(current)
+            self.assertEqual(set(current['panes']), {'orchestrator', 'app'})
+            socket_path = tmux('-L', 'fixture-other', 'display-message', '-p', '#{socket_path}').stdout.strip()
+            def confirm_target(program, args):
+                with self.terminal_client(args) as pid:
+                    self.assertEqual(self.client_session(tmux, socket_path, pid), name)
+                    tmux('-S', socket_path, 'detach-client', '-s', '=' + name)
+            with patch('os.execvp', side_effect=confirm_target) as attach:
+                data['reconnect'](self.root, current)
+            attach.assert_called_once()
+            legacy = data['active_team'](self.root)
+            with patch('os.execvp', side_effect=confirm_target) as attach:
+                data['reconnect'](self.root, legacy)
+            attach.assert_called_once()
+            unrelated = tmux('-S', socket_path, 'display-message', '-p', '-t', '=unrelated:',
+                             '#{pid}|#{pane_id}').stdout.strip().split('|')
+            with self.terminal_client(['tmux', '-S', socket_path, 'attach-session', '-t', '=unrelated']) as pid:
+                self.assertEqual(self.client_session(tmux, socket_path, pid), 'unrelated')
+                def switch_target(program, args):
+                    command = subprocess.run(args, capture_output=True, check=True, timeout=5)
+                    self.assertEqual(command.stdout.strip(), b'')
+                with (patch.dict(os.environ, {'TMUX': socket_path + ',' + unrelated[0] + ',0',
+                                              'TMUX_PANE': unrelated[1]}),
+                      patch('os.execvp', side_effect=switch_target)):
+                    data['reconnect'](self.root, current)
+                self.assertEqual(self.client_session(tmux, socket_path, pid), name)
+                tmux('-S', socket_path, 'detach-client', '-s', '=' + name)
+            data['stop_managed'](self.root, current, 'app')
+            current = data['managed_team'](self.root)
+            self.assertEqual(set(current['panes']), {'orchestrator'})
+            data['stop_managed'](self.root, current)
+            self.assertIsNone(data['managed_team'](self.root))
+            tmux('-L', 'fixture-other', 'has-session', '-t', '=unrelated')
+
+    @unittest.skipUnless(shutil.which('tmux'), 'requires tmux')
+    def test_launcher_attaches_to_verified_session_after_its_name_is_reused(self):
+        with self.isolated_tmux() as tmux:
+            tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'fixture', 'sleep', '120')
+            (self.base / 'copilot').write_text('#!/bin/sh\nexec sleep 120\n')
+            api = runpy.run_path(str(self.plugin / 'team'))
+            role = api['RoleSettings']('copilot', 'auto', None)
+            name = api['setup_team'](self.root, ['app'], role, role)
+
+            def race(program, args):
+                socket_path = tmux('display-message', '-p', '-t', '=' + name + ':', '#{socket_path}').stdout.strip()
+                tmux('-S', socket_path, 'rename-session', '-t', '=' + name, 'original-team')
+                tmux('-S', socket_path, 'new-session', '-d', '-s', name, 'sleep', '120')
+                with self.terminal_client(args) as pid:
+                    self.assertEqual(self.client_session(tmux, socket_path, pid), 'original-team')
+
+            with (patch.object(sys.stdin, 'isatty', return_value=True),
+                  patch.object(sys, 'argv', ['team', 'app']), patch('os.execvp', side_effect=race) as attach):
+                api['main']()
+            attach.assert_called_once()
+
+    @unittest.skipUnless(shutil.which('tmux'), 'requires tmux')
+    def test_team_starts_in_c_locale_with_spaces_in_socket_directory(self):
+        with self.isolated_tmux(prefix='team socket ', locale='C') as tmux:
+            tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'fixture', 'sleep', '120')
+            (self.base / 'copilot').write_text('#!/bin/sh\nexec sleep 120\n')
+            api = runpy.run_path(str(self.plugin / 'team'))
+            role = api['RoleSettings']('copilot', 'auto', None)
+            api['setup_team'](self.root, ['app'], role, role)
+            state = api['control']['managed_team'](self.root)
+            self.assertEqual(set(state['panes']), {'app', 'orchestrator'})
+            self.assertIn('team socket ', api['control']['team_socket'](self.root))
+
+    def test_unusable_socket_records_do_not_select_other_servers(self):
+        api = runpy.run_path(str(self.plugin / 'team_control.py'))
+        binding = self.root / api['SOCKET_RECORD']
+        missing = self.base / 'missing-socket'
+        binding.write_text(str(missing))
+        self.assertIsNone(api['team_socket'](self.root))
+        for label, contents in [('relative', 'socket'), ('empty', ''), ('oversize', 'x' * 4097),
+                                ('invalid path', 'one\x00two'), ('regular file', str(self.root / 'projects.json'))]:
+            with self.subTest(label=label):
+                binding.write_text(contents)
+                with patch('subprocess.run') as tmux:
+                    self.assertIsNone(api['managed_team'](self.root))
+                    tmux.assert_not_called()
+        binding.unlink()
+        binding.symlink_to(self.root / 'projects.json')
+        with patch('subprocess.run') as tmux:
+            self.assertIsNone(api['managed_team'](self.root))
+            tmux.assert_not_called()
 
     @unittest.skipUnless(shutil.which('tmux'), 'requires tmux')
     def test_reconnect_selects_coordinator_pane_and_ignores_replaced_worker(self):

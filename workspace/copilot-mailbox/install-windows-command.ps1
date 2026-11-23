@@ -2,13 +2,17 @@ try {
     $ErrorActionPreference = 'Stop'
     $distro = $env:HARNESS_TEAM_DISTRO
     if ($distro -cnotmatch '\A[A-Za-z0-9][A-Za-z0-9 ._-]*\z' -or $distro.Trim() -ne $distro) { exit 1 }
+    $account = $env:HARNESS_TEAM_USER
+    if ([string]::IsNullOrEmpty($account) -or $account -cnotmatch '\A[A-Za-z0-9_][A-Za-z0-9_.-]*\$?\z') { exit 1 }
     $bin = Join-Path $env:LOCALAPPDATA 'HarnessMailbox\bin'
     $shim = Join-Path $bin 'team.cmd'
-    $prefix = '"%SystemRoot%\System32\wsl.exe" --distribution "{0}" --cd ~ --exec ' -f $distro
-    $launch = $prefix + '/usr/bin/env python3 .local/bin/team --from-windows'
-    $content = "@echo off`r`n$launch`r`nexit /b %errorlevel%`r`n"
-    $previousLaunch = $prefix + '/bin/sh -lc "exec ~/.local/bin/team"'
-    $previousContent = "@echo off`r`n$previousLaunch`r`nexit /b %errorlevel%`r`n"
+    $prefix = '"%SystemRoot%\System32\wsl.exe" --distribution "{0}"' -f $distro
+    $command = ' --cd ~ --exec /usr/bin/env python3 .local/bin/team --from-windows'
+    $content = "@echo off`r`n" + $prefix + (' --user "{0}"' -f $account) + $command + "`r`nexit /b %errorlevel%`r`n"
+    $previous = @(
+        ("@echo off`r`n" + $prefix + $command + "`r`nexit /b %errorlevel%`r`n")
+        ("@echo off`r`n" + $prefix + ' --cd ~ --exec /bin/sh -lc "exec ~/.local/bin/team"' + "`r`nexit /b %errorlevel%`r`n")
+    )
     # WSL interop may start this process with an older snapshot of Windows PATH.
     $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -19,7 +23,7 @@ try {
     $installed = $null
     if (Test-Path -LiteralPath $shim) {
         $installed = [IO.File]::ReadAllText($shim)
-        if ($installed -cne $content -and $installed -cne $previousContent) { exit 1 }
+        if ($installed -cne $content -and $installed -cnotin $previous) { exit 1 }
     }
     if ($env:HARNESS_TEAM_CHECK -eq '1') {
         $registered = @(([string]$userPath -split ';') | ForEach-Object {

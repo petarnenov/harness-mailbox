@@ -16,7 +16,7 @@ import tempfile
 import unicodedata
 import uuid
 
-from team_control import coordinator_locked, managed_team, parse_roster, stop_managed
+from team_control import attach, coordinator_locked, managed_team, stop_managed, team_socket, tmux_client
 
 
 TOOLS = Path(__file__).resolve().parent
@@ -45,7 +45,7 @@ def ensure_dashboard(root):
                     if time.monotonic() >= deadline:
                         return False
                     time.sleep(0.1)
-            with subprocess.Popen(["sh", str(workflow), "ensure-dashboard"], stdin=subprocess.DEVNULL,
+            with subprocess.Popen(["sh", str(workflow), "ensure-dashboard", str(root.resolve())], stdin=subprocess.DEVNULL,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                   start_new_session=True) as process:
                 try:
@@ -264,6 +264,195 @@ def _registry_edit(root):
         raise ValueError("Could not update the registry. Check projects.json and try again.") from None
 
 
+def _directory_identity(directory):
+    """Recognize a renamed folder without handing its history to a reused pathname or inode."""
+    try:
+        path = Path(directory).expanduser()
+        if not path.is_absolute():
+            return None
+        info = path.stat()
+        if not stat.S_ISDIR(info.st_mode) or not info.st_ino:
+            return None
+        created = getattr(info, "st_birthtime", None)
+        if created is None:
+            # Linux exposes birth time through statx, used by GNU stat, but not os.stat.
+            result = subprocess.run(["/usr/bin/stat", "-c", "%w", "--", str(path.resolve())],
+                                    capture_output=True, text=True, check=True, timeout=2,
+                                    env={**os.environ, "LC_ALL": "C", "TZ": "UTC0"})
+            created = result.stdout.strip()
+        if not created or created == "-":
+            return None
+        return [info.st_dev, info.st_ino, created]
+    except (OSError, RuntimeError, TypeError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _route_binding(root, name, directory, *, reserve=False):
+    """Keep removed route IDs bound to their original folder, independently of registry shape."""
+    archive = root / "archive"
+    if reserve:
+        archive.mkdir(mode=0o700, exist_ok=True)
+    try:
+        parent = os.open(archive, READ_FLAGS | os.O_DIRECTORY)
+    except FileNotFoundError:
+        return False
+    try:
+        marker = ".team-route-" + hashlib.sha256(name.casefold().encode()).hexdigest()
+        try:
+            fd = os.open(marker, READ_FLAGS, dir_fd=parent)
+        except FileNotFoundError:
+            if not reserve:
+                return False
+            content = json.dumps([name, _directory_identity(directory)]).encode("ascii")
+            # Commit each binding before the registry removal. A retry can reuse it.
+            temporary = ".team-binding-" + uuid.uuid4().hex
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.link(temporary, marker, src_dir_fd=parent, dst_dir_fd=parent)
+                os.fsync(parent)
+            finally:
+                os.unlink(temporary, dir_fd=parent)
+            return True
+        with os.fdopen(fd, "rb") as stream:
+            identity = _directory_identity(directory)
+            content = json.dumps([name, identity]).encode("ascii")
+            if stat.S_ISREG(os.fstat(fd).st_mode) and (identity is not None or reserve):
+                if stream.read(len(content) + 1) == content:
+                    return True
+        raise _RegistryActionError("This project ID belongs to a previously registered folder. Choose another ID.")
+    finally:
+        os.close(parent)
+
+
+def _session_for_route(parent, filename, key):
+    suffix = filename.casefold()[len(key) + 2:-5]
+    if "--" not in suffix:
+        return True
+    # Both project IDs and endpoint names may contain "--". Consult the record
+    # only when the filename alone could belong to two different projects.
+    with os.fdopen(os.open(filename, READ_FLAGS, dir_fd=parent), "rb") as stream:
+        limit = 4 * 1024 * 1024
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            return True
+        data = stream.read(limit + 1)
+    if len(data) <= limit:
+        try:
+            record = json.loads(data)
+            project = record.get("project") if isinstance(record, dict) else None
+            if _project_id(project) and filename.casefold().startswith(project.casefold() + "--"):
+                return project.casefold() == key
+        except (RecursionError, ValueError):
+            pass
+    return True
+
+
+def _snapshot(parent, filename):
+    """Read the dashboard's data-only snapshot formats from a verified directory."""
+    try:
+        with os.fdopen(os.open(filename, READ_FLAGS, dir_fd=parent), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 4_000_000:
+                return None
+            contents = stream.read(4_000_001)
+            if len(contents) <= 4_000_000:
+                return json.loads(contents)
+    except (OSError, RecursionError, ValueError):
+        pass
+    return None
+
+
+def _matches_route(value, key):
+    return isinstance(value, str) and value.casefold() == key
+
+
+def _aggregate_mentions(data, key):
+    pending = [data]
+    while pending:
+        record = pending.pop()
+        if not isinstance(record, dict):
+            continue
+        for field in ("projects", "per_project", "project_metrics"):
+            children = record.get(field)
+            if isinstance(children, dict):
+                if any(_matches_route(name, key) for name in children):
+                    return True
+                pending.extend(children.values())
+            elif isinstance(children, list):
+                for child in children:
+                    if isinstance(child, dict) and isinstance(name := child.get("project", child.get("id")), str):
+                        if _matches_route(name, key):
+                            return True
+                        pending.append(child)
+    return False
+
+
+def _epic_mentions(folder, key):
+    issues = _snapshot(folder, "issues.json")
+    if isinstance(issues, dict):
+        issues = issues.get("issues", issues)
+    if isinstance(issues, (dict, list)):
+        for row in issues.values() if isinstance(issues, dict) else issues:
+            if isinstance(row, dict):
+                projects = row.get("projects", row.get("affected_projects", []))
+                if _matches_route(projects, key) or (isinstance(projects, list) and
+                                                     any(_matches_route(name, key) for name in projects)):
+                    return True
+    return _aggregate_mentions(_snapshot(folder, "progress.json"), key)
+
+
+def _route_has_history(root, name):
+    """A legacy mailbox may have records for an ID without a stored folder binding."""
+    key = name.casefold()
+    for tree in ("tasks", "inbox", "outbox", "archive", "projects", "sessions", "epics"):
+        try:
+            parent = os.open(root / tree, READ_FLAGS | os.O_DIRECTORY)
+        except FileNotFoundError:
+            continue
+        try:
+            for entry in os.listdir(parent):
+                folded = entry.casefold()
+                if tree in ("projects", "sessions") and folded.endswith(".json"):
+                    if folded == key + ".json":
+                        return True
+                    if tree == "sessions" and folded.startswith(key + "--") and _session_for_route(parent, entry, key):
+                        return True
+                    if tree == "projects":
+                        project = _snapshot(parent, entry)
+                        if isinstance(project, dict) and (_matches_route(project.get("id"), key)
+                                                         or _aggregate_mentions(project, key)):
+                            return True
+                if folded == key and tree != "epics":
+                    child = os.open(entry, READ_FLAGS | os.O_DIRECTORY, dir_fd=parent)
+                    try:
+                        with os.scandir(child) as contents:
+                            if next(contents, None) is not None:
+                                return True
+                    finally:
+                        os.close(child)
+                elif tree in ("epics", "tasks"):
+                    if not stat.S_ISDIR(os.stat(entry, dir_fd=parent, follow_symlinks=False).st_mode):
+                        continue
+                    child = os.open(entry, READ_FLAGS | os.O_DIRECTORY, dir_fd=parent)
+                    try:
+                        if tree == "epics" and _epic_mentions(child, key):
+                            return True
+                        if tree == "tasks":
+                            for filename in os.listdir(child):
+                                if filename.endswith(".json"):
+                                    task = _snapshot(child, filename)
+                                    if isinstance(task, dict) and _matches_route(task.get("project"), key):
+                                        return True
+                    finally:
+                        os.close(child)
+        finally:
+            os.close(parent)
+    return False
+
+
 def add_project(root, folder, project_id):
     """Reuse a local project or register its working directory."""
     root = Path(root)
@@ -289,6 +478,8 @@ def add_project(root, folder, project_id):
                 occupied.add("projects")
         if project_id.casefold() in occupied:
             raise _RegistryActionError("This project ID is already in use or reserved. Enter a different ID.")
+        if not _route_binding(root, project_id, folder) and _route_has_history(root, project_id):
+            raise _RegistryActionError("This project ID has existing mailbox records. Choose another ID.")
         if isinstance(registry.entries, dict):
             registry.entries[project_id] = entry
         else:
@@ -308,7 +499,7 @@ def _unidentified_team(root, *, known_session=False):
         return False
     name = runpy.run_path(str(TOOLS / "team"))["session_name"](root)
     try:
-        result = subprocess.run(["tmux", "has-session", "-t", "=" + name], timeout=2,
+        result = subprocess.run([*tmux_client(team_socket(root)), "has-session", "-t", "=" + name], timeout=2,
                                 capture_output=True, env={**os.environ, "LC_ALL": "C"})
     except FileNotFoundError:
         return False
@@ -332,6 +523,8 @@ def remove_project(root, project_id, expected):
             if active and any(slot.partition("+")[0] in current["ids"] for slot in active["panes"]):
                 raise _RegistryActionError("Stop all workers for this project before removing it.")
             keys = [registry.keys[name] for name in current["ids"]]
+            for name in current["ids"]:
+                _route_binding(root, name, registry.records[name].get("working_directory"), reserve=True)
             if isinstance(registry.entries, list):
                 keys.sort(reverse=True)
             for key in keys:
@@ -342,45 +535,16 @@ def remove_project(root, project_id, expected):
 
 
 def active_team(root):
-    """Only offer reconnection when a live, fully tagged team owns the coordinator lock."""
+    """Observe a complete team, including the identity of a legacy coordinator."""
     root = Path(root).resolve()
     try:
-        with os.fdopen(os.open(root / ".copilot-mailbox-orchestrator.lock", READ_FLAGS), "rb") as lock:
-            if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
-                return None
-            try:
-                fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                return None
-            except BlockingIOError:
-                pass
-        name = runpy.run_path(str(TOOLS / "team"))["session_name"](root)
-        reply = subprocess.run(
-            ["tmux", "list-panes", "-s", "-t", "=" + name + ":",
-             "-F", "#{session_id}|#{pane_id}|#{pane_dead}|#{@copilot_route}|#{@copilot_projects}"],
-            capture_output=True, text=True, check=True, timeout=1,
-        )
-        roles = {}
-        session = None
-        roster = None
-        for line in reply.stdout.splitlines():
-            session_id, pane, dead, role, members = line.split("|")
-            if not re.fullmatch(r"\$\d+", session_id) or not re.fullmatch(r"%\d+", pane):
-                return None
-            if session is not None and session != session_id:
-                return None
-            session = session_id
-            if roster is None:
-                roster = members
-            elif members != roster:
-                return None
-            if role and dead == "0":
-                if role in roles:
-                    return None
-                roles[role] = pane
-        selected = parse_roster(roster or "")
-        if sorted(roles) != sorted([*selected, "orchestrator"]):
+        if not coordinator_locked(root):
             return None
-        return selected, session, roles["orchestrator"]
+        active = managed_team(root)
+        if not active or set(active["panes"]) != {"orchestrator", *active["projects"]}:
+            return None
+        pane = active["panes"]["orchestrator"]
+        return active["projects"], active["session"], pane, active["socket"], active["identities"][pane]
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
@@ -391,18 +555,16 @@ def reconnect(root, expected):
         active = managed_team(root)
         if not active or active != expected or "orchestrator" not in active["panes"]:
             raise ValueError("This team is no longer available. Reopen team to refresh its status.")
-        session, coordinator = active["session"], active["panes"]["orchestrator"]
+        pane = active["panes"]["orchestrator"]
+        socket, identity = active["socket"], active["identities"][pane]
     else:
         active = active_team(root)
         if not active or active != expected:
             raise ValueError("This team is no longer available. Reopen team to refresh its status.")
-        _, session, coordinator = active
+        _, _, pane, socket, identity = active
     try:
-        subprocess.run(["tmux", "select-window", "-t", coordinator, ";", "select-pane", "-t", coordinator],
-                       capture_output=True, check=True, timeout=1)
-        action = "switch-client" if os.environ.get("TMUX") else "attach-session"
-        os.execvp("tmux", ["tmux", action, "-t", session])
-    except (OSError, subprocess.SubprocessError):
+        attach(socket, pane, identity)
+    except OSError:
         raise ValueError("The team connection was interrupted.") from None
 
 
