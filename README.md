@@ -46,22 +46,21 @@ Open a new terminal and type `team` from any directory. To verify the installati
 | Linux (apt or dnf) | Your shell | A new terminal |
 | Windows | A WSL 2 Linux shell, in the checkout | PowerShell, Command Prompt, or the installing WSL distribution |
 
-On Windows, clone the repository **inside the WSL distribution** (for example, under `~/src`). Keep Windows interoperability enabled. If you use Docker Desktop, enable WSL integration for that distribution. On a clean apt- or dnf-based WSL distribution, setup can install Docker Engine directly using systemd. Setup registers the Windows command for your user and binds it to that distribution.
+On Windows, clone the repository **inside the WSL distribution** (for example, under `~/src`). Keep Windows interoperability enabled. If you use Docker Desktop, enable WSL integration for that distribution. On a clean apt- or dnf-based WSL distribution, setup can install Docker Engine directly using systemd. Setup registers the Windows command for your user and binds it to the Linux account and distribution that ran setup.
 
-Setup prepares a private `mailbox-data/` directory and an empty project registry for a standalone checkout. It installs the launcher, checks Python with curses and tmux, and builds the dashboard. Choose your first project in the `team` menu. Install and sign in to the harness CLIs you plan to use in the same environment as the mailbox.
+For a standalone checkout, setup creates a private `mailbox-data/` directory with an empty project registry. It installs the launcher and missing runtime dependencies, including Python 3.8+ with curses and tmux, and builds the dashboard. Install and sign in to the harness CLIs you plan to use in the same environment as the mailbox. [Run a team](#run-a-team)
 
 ## System dependencies
 
-On **macOS**, setup uses Homebrew to install missing prerequisites and starts Docker Desktop when needed. On **Linux** with apt or dnf, setup installs missing prerequisites and can install Docker Engine and the Compose plugin. On all three platforms, doctor checks the launcher, its shell PATH, the team runtime, Docker and the configured mailbox. On Windows it also validates the PowerShell/Command Prompt launcher and its registered user PATH.
+On **macOS**, setup uses Homebrew to install missing prerequisites and starts Docker Desktop when needed. On **Linux** with apt or dnf, setup installs missing prerequisites and can install Docker Engine and the Compose plugin. On all three platforms, doctor checks the launcher, its shell PATH, the team runtime, Docker and whether the team menu can read the configured project registry. On Windows it also validates the PowerShell/Command Prompt launcher and its registered user PATH.
 
-If Make is not installed yet, bootstrap it from the component directory first:
+If Make is missing, run `sh scripts/install-system.sh` from the component directory. On macOS, make the Homebrew version available in the current shell before continuing.
 
 ```sh
-sh scripts/install-system.sh
-# Homebrew exposes GNU Make as make through its gnubin directory.
 export PATH="/opt/homebrew/opt/make/libexec/gnubin:/usr/local/opt/make/libexec/gnubin:$PATH"
-make setup
 ```
+
+Then run `make setup`.
 
 System installation may request administrator authentication. Docker Desktop may require you to finish its first-run prompts; setup waits for readiness for up to 120 seconds and reports an actionable error if it cannot proceed. On Linux, an existing engine must be accessible to your account; setup does not change socket permissions or grant group access. The team menu uses local Python. Dashboard development tests and coverage run inside containers. `make doctor` only checks and never invokes the installer.
 
@@ -71,11 +70,11 @@ From an existing mailbox workspace, install the component if `dashboard/` is abs
 git clone https://github.com/petarnenov/harness-mailbox.git dashboard
 cd dashboard
 make setup
-make doctor
-make up
 ```
 
-If the component is already present, run the same Make commands there. Setup detects the mailbox's `projects.json` in the checkout or its parent, creates `.env` only when absent, and installs a forwarding `Makefile` in the parent workspace if it has none. After setup, all commands also work directly from the mailbox root. Existing `.env` and root `Makefile` files are preserved.
+Open a new terminal after installation. Use `make doctor` to verify setup, `team` to open the menu, or `make up` to start the dashboard independently.
+
+If the component is already present, run the same Make commands there. Setup detects the mailbox's `projects.json` in the checkout or its parent, creates `.env` only when absent, and installs a forwarding `Makefile` in the parent workspace if it has none. In a mailbox with this forwarding Makefile, the same Make targets work from the mailbox root. Existing `.env` and root `Makefile` files are preserved.
 
 For a mailbox at another location, provide its absolute path:
 
@@ -130,23 +129,23 @@ The sticky header contains five page tabs: **Overview**, **Dependencies**, **Tas
 
 The dashboard is independent of the agent host. Codex, Claude Code, GitHub Copilot or another local tool can produce the same JSON snapshots using the contract below; the application only reads files. The workspace skills define discovery and message delivery for each host. The displayed agent effort model is a planning convention, not a connection to an agent or billing API.
 
-The same `make setup` installs the launcher for all supported harnesses. Each project path must be accessible from the environment in which its harness runs. On Windows, reopen your terminal after setup so PowerShell or Command Prompt picks up the updated user PATH.
+## Run a team
 
-Opening `team` starts the local dashboard at **http://localhost:17171** if its Docker Compose service is stopped or missing. Opening the menu again leaves a running container in place. If Docker is unavailable, the menu shows a warning and you can still manage the team.
+1. Open a terminal and type `team`. Press `A` to add a local project. In the folder browser, use Up/Down to highlight a directory, Right or Enter to open it, and Left to go to its parent. Press Space to select the directory shown at the top. Confirm or edit its project ID. Esc cancels.
+2. On **Select projects**, use Space to select existing projects. Newly added projects are already selected. Use `+` or `-` on a project to adjust its worker count, then press Enter. Each team has one orchestrator for all selected projects and one tmux window per worker. A new project can join the team immediately. Before accepting an execution task, its worker must register and identify the project’s required loop skill.
+3. Choose the orchestrator’s harness, model and reasoning effort, then configure the workers. Each role can use GitHub Copilot, Claude Code or Codex. All workers use the worker configuration. Select **Automatic selection** to use the harness default, press `R` to refresh its model catalog, or enter a model ID manually. The effort picker appears when the catalog lists reasoning levels for the model. Claude model labels show the CLI’s current display name alongside its launch ID.
+4. On **Review team**, select **Start team**. Give the objective in the orchestrator window. For a first check, enter “Ask each selected worker to report its current branch and HEAD commit, then summarize the confirmed replies.” With the default tmux bindings, press `Ctrl-b` then `w` to visit worker windows for first-run trust or sign-in prompts.
 
-Type `team` from any directory. Mark the local projects with Space. Press `A` to open the directory browser. Use Up/Down to highlight a folder, Right or Enter to open it, and Left to return to its parent. Press Space to select the directory shown at the top, then confirm its editable ID. Esc leaves the browser. The new record uses the chosen working directory and the containing Git repository root when available. An existing working directory reuses its ID. The installer and interactive menu use the user's local mailbox.
+The menu opens in dark mode on first use and remembers your theme. Press `T` to switch themes or Ctrl-T while editing an ID. New participants inherit the launching shell’s provider configuration directories. Each CLI handles its own trust prompts and permissions.
 
-Adding the same working directory again selects its existing project ID. If a project uses a subdirectory of a Git checkout, selecting the checkout root reuses the project when the match is unambiguous. An old duplicate root registration appears under the original project in the menu.
+### Manage projects and sessions
 
-Each selected project starts with one worker. Highlight a project and use `+` or `-` to adjust its worker count before launch. The team starts one orchestrator for all projects and opens a separate terminal window for each worker. Workers on the same project share its inbox and register individual endpoints. The orchestrator addresses each assignment to one endpoint. From the active team menu you can stop workers individually.
+- **Add or remove a project.** Adding the same working directory reuses its ID. Selecting the containing Git checkout also reuses the registration when it maps unambiguously to one project. The menu groups old duplicate registrations. Press `D` or Delete on a project to review the IDs to remove. Stop its workers first. Confirmation removes the registration and preserves the project files, messages and task history. A renamed directory can reclaim its ID when the filesystem confirms its identity. If ownership cannot be verified or the directory belongs to a different project, choose a new ID.
+- **Reconnect or stop workers.** Run `team` in a second terminal, including when the team uses a named tmux server. Select the orchestrator to reconnect, an individual worker to stop it, or **Stop entire team**. Review the affected sessions before confirming. Workers sharing a project have separate mailbox endpoints. Reconnection checks the original coordinator so a replacement tmux session cannot receive the connection. Older teams without recorded pane ownership offer reconnection only. A past mailbox registration can remain on disk after the process exits. Confirm that the endpoint is reachable before assigning more work.
+- **Leave the team running.** Press `Q` in the management menu or `Ctrl-b` then `d` to detach from tmux. Projects added while the team is running are available for its next launch.
+- **View the dashboard.** Opening `team` starts or resumes the Docker Compose dashboard for the installed command’s mailbox at **http://localhost:17171**. Reopening the menu reuses the running container. If Docker is unavailable or an existing container belongs to another checkout or mailbox, the menu displays a warning and team management remains available.
 
-Highlight a project and press `D` or Delete to remove it from the local registry. The confirmation shows the project directory and the IDs that will be removed. Cancel is selected initially. Confirming keeps project files, task history and other projects on disk. From the active team menu, choose **Remove project** to browse registered projects.
-
-Select the orchestrator's harness, model and reasoning effort, then select the workers' harness, model and effort independently. Each role supports Copilot, Claude Code and Codex. The worker settings apply to every worker window. The model picker reads the selected CLI's catalog, supports refresh with `R` and accepts manual model IDs. For Claude Code, each alias is displayed with the model name and version advertised by the CLI; launching passes the selected ID to Claude Code. A separate effort picker appears for models that advertise reasoning levels. Review both roles before starting. Use `T` to switch between dark and light or `Ctrl-T` while editing an ID.
-
-Run `team` in another terminal to manage the current team. You can also detach from tmux with its default `Ctrl-B`, then `D`, and run the same command. Choose the orchestrator to reconnect, a project worker to stop it, or the whole team to stop all managed participants. Confirm the affected participants to interrupt their CLI sessions. Other tmux programs remain open. Older teams without the original pane ownership information allow reconnection only. Codex runs in its own foreground CLI with its configured permissions. First use can require project trust, sign-in or mailbox access approval. Adding a project while a team is running registers it for the next team. `Q` exits the management menu and leaves running workers alone.
-
-The workspace template includes two Copilot CLI profiles. Install `workspace/.github/agents/mailbox-*.agent.md` under the mailbox's `.github/agents/` alongside the standard workspace skills. For autonomous notification, also copy the complete `workspace/copilot-mailbox/` directory into the mailbox root and preserve the executable bits on `team` and `start`. The interactive `team` command loads these profiles when you select Copilot. The [Copilot walkthrough](workspace/.agents/skills/mailbox-orchestrator/references/host-adapters.md#starting-copilot-cli) also covers separate terminals and delivery verification.
+Setup refreshes the launchers and Copilot mailbox extension. It supplies missing agent profiles and mailbox skills and preserves existing workspace instructions and profiles. A Copilot worker started by the launcher offers its own session for registration. The orchestrator confirms it through a correlated request and reply. Native Codex and Claude Code sessions use the mailbox and the session tools available to their host. The host adapter reference covers mixed teams, manual sessions and delivery verification. [Host adapters in the source checkout](workspace/.agents/skills/mailbox-orchestrator/references/host-adapters.md#starting-a-team)
 
 ## Delivery package
 
@@ -286,6 +285,8 @@ make health
 ```
 
 Tests use temporary directories and synthetic data; they never mutate live mailbox state. Workflow tests cover dependency/configuration failures, environment precedence, configuration preservation, setup repeatability and demo isolation. Browser verification covers filters, model edits, cycles, unresolved nodes, narrow viewport, source warnings and safe text rendering. Local development evidence is excluded from the public repository.
+
+The Team setup workflow runs installation and diagnosis regressions on macOS and Ubuntu. Its Windows job exercises the PowerShell command registration and diagnostics on a Windows runner. Interactive sessions inside WSL 2 require a separate end-to-end check. [Team setup workflow](.github/workflows/team-setup.yml)
 
 ## License
 

@@ -15,13 +15,17 @@ import uuid
 from typing import NamedTuple, Optional
 
 CONTROL = Path(__file__).resolve().with_name("team_control.py")
+control = runpy.run_path(str(CONTROL))
+# The model picker reads profiles in the calling shell. A long-running tmux server
+# may have started before that shell selected its provider configuration.
+PROFILE_DIRECTORIES = ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")
 
 class StartupError(Exception):
     """A fixed diagnostic that may be shown to the operator."""
 
 
-def tmux(*args, check=True):
-    return subprocess.run(["tmux", *args], check=check, capture_output=True, text=True)
+def tmux(*args, check=True, socket=None):
+    return subprocess.run([*control["tmux_client"](socket), *args], check=check, capture_output=True, text=True)
 
 
 def session_name(root):
@@ -63,6 +67,9 @@ def launch_pane(launcher):
     # project validation and, for the coordinator, after winning the lock.
     sys.argv = [str(launcher), *sys.argv[2:]]
     pane = os.environ.get("TMUX_PANE", "")
+    for variable in PROFILE_DIRECTORIES:
+        if os.environ.get(variable) == "":
+            os.environ.pop(variable)
     if len(sys.argv) < 2 or (sys.argv[1] == "worker" and len(sys.argv) < 3):
         raise StartupError("Specify a participant role. Workers also need a project ID.")
     if not re.fullmatch(r"%[0-9]+", pane):
@@ -81,14 +88,14 @@ def launch_pane(launcher):
     runpy.run_path(str(launcher))["main"](on_ready=ready)
 
 
-def pane_roles(name):
+def pane_roles(name, socket=None):
     # A respawned pane keeps its tmux options. Count it only while its original
     # foreground process is present; legacy unpinned teams can still reconnect.
     same_token = "#{==:#{@mailbox_pane_token},#{@mailbox_team_token}}"
     original_pid = "#{||:#{==:#{@mailbox_initial_pid},},#{==:#{@mailbox_initial_pid},#{pane_pid}}}"
     result = tmux("list-panes", "-s", "-t", "=" + name + ":",
                   "-f", "#{&&:" + same_token + "," + original_pid + "}",
-                  "-F", "#{pane_id} #{pane_dead} #{@copilot_route}", check=False)
+                  "-F", "#{pane_id} #{pane_dead} #{@copilot_route}", check=False, socket=socket)
     live = {}
     for line in result.stdout.splitlines():
         pane, dead, route = line.split(" ", 2)
@@ -97,10 +104,10 @@ def pane_roles(name):
     return live
 
 
-def wait_for_members(name, expected):
+def wait_for_members(name, expected, socket=None):
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        live = pane_roles(name)
+        live = pane_roles(name, socket)
         if not expected.keys() <= live.keys():
             break
         if all(live[pane] == route for pane, route in expected.items()):
@@ -146,9 +153,13 @@ def create_team(root, launcher, name, projects, slots, orchestrator, workers):
     for project in projects:
         arguments.extend(["--project", project])
     # An existing tmux server may have inherited PATH before Copilot was installed.
-    coordinator = tmux("new-session", "-d", "-P", "-F", "#{pane_id}", "-s", temporary,
+    environment = []
+    for variable in PROFILE_DIRECTORIES:
+        environment.extend(["-e", variable + "=" + os.environ.get(variable, "")])
+    initial = tmux("new-session", "-d", "-P", "-F", "#{pane_id} #{socket_path}", "-s", temporary,
                        "-n", "orchestrator", "-c", str(root), "-e", "PATH=" + os.environ["PATH"],
-                       *arguments).stdout.strip()
+                       *environment, *arguments).stdout.rstrip("\n")
+    coordinator, _, socket = initial.partition(" ")
     target = "=" + temporary
     try:
         expected = {coordinator: "orchestrator"}
@@ -163,14 +174,17 @@ def create_team(root, launcher, name, projects, slots, orchestrator, workers):
             tmux("set-option", "-p", "-t", pane, "@mailbox_pane_token", token)
         tmux("set-option", "-t", target + ":", "@mailbox_team_token", token)
         tmux("set-option", "-t", target + ":", "@copilot_projects", ",".join(sorted(slots)))
+        if socket:
+            control["remember_socket"](root, socket)
         tmux("rename-session", "-t", target, name)
     except BaseException:
         # The private staging name only exists if this invocation created it.
         tmux("kill-session", "-t", target, check=False)
         raise
+    return socket or None
 
 
-def setup_team(root, projects, orchestrator, workers, new_team=False):
+def setup_team(root, projects, orchestrator, workers, new_team=False, *, attach_target=False):
     launcher = root / "copilot-mailbox" / "start"
     if not launcher.is_file() or not os.access(launcher, os.X_OK):
         raise StartupError("The copilot-mailbox/start launcher is missing or cannot be executed.")
@@ -183,28 +197,41 @@ def setup_team(root, projects, orchestrator, workers, new_team=False):
         registry = api["read_registry"](root)
         for project in unique_projects:
             api["working_directory"](registry, project)
-        exists = tmux("has-session", "-t", "=" + name, check=False).returncode == 0
+        socket = control["team_socket"](root)
+        exists = tmux("has-session", "-t", "=" + name, check=False, socket=socket).returncode == 0
+        if socket and not exists:
+            # A released server can still host unrelated windows. A new team belongs
+            # in the caller's server; also allow reconnection to a local legacy team.
+            socket = None
+            exists = tmux("has-session", "-t", "=" + name, check=False).returncode == 0
         if exists and not coordinator_running(root):
-            control = runpy.run_path(str(CONTROL))
-            previous = control["managed_team"](root, include_retired=True)
+            previous = control["managed_team"](root, include_retired=True, socket=socket)
             if previous and not previous["owned"]:
                 control["release_surviving_session"](previous)
                 exists = False
         if not exists:
-            create_team(root, launcher, name, unique_projects, slots, orchestrator, workers)
+            socket = create_team(root, launcher, name, unique_projects, slots, orchestrator, workers)
         else:
             if new_team:
                 raise StartupError("Another team just started. Open team again to connect.")
-            stored = tmux("show-options", "-qv", "-t", "=" + name + ":", "@copilot_projects")
+            stored = tmux("show-options", "-qv", "-t", "=" + name + ":", "@copilot_projects", socket=socket)
             if stored.stdout.strip() != ",".join(sorted(slots)):
                 raise StartupError("This tmux session has a different team. Check the projects and worker counts.")
             if not coordinator_running(root):
                 raise StartupError("The orchestrator for this team is no longer running.")
-        roles = pane_roles(name)
+        roles = pane_roles(name, socket)
         if sorted(role for role in roles.values() if role) != sorted(["orchestrator", *slots]):
             raise StartupError("A team member is missing. The other tmux panes are still open.")
         coordinator = next(pane for pane, role in roles.items() if role == "orchestrator")
-        tmux("select-window", "-t", coordinator, ";", "select-pane", "-t", coordinator)
+        observed = tmux("display-message", "-p", "-t", coordinator, control["IDENTITY"] + " #{socket_path}",
+                        socket=socket).stdout.rstrip("\n")
+        identity, _, observed_socket = observed.partition(" ")
+        control["verify_socket"](observed_socket)
+        if observed_socket != socket:
+            control["remember_socket"](root, observed_socket)
+        if attach_target:
+            return observed_socket, coordinator, identity
+        control["attach"](observed_socket, coordinator, identity, focus_only=True)
     return name
 
 
@@ -235,10 +262,9 @@ def main():
         if not shutil.which("tmux"):
             raise StartupError("Install tmux to run the team in a shared terminal.")
         root = Path(__file__).resolve().parent.parent
-        name = setup_team(root, args.projects, settings_for(args, "orchestrator"),
-                          settings_for(args, "worker"), args.new_team)
-        action = "switch-client" if os.environ.get("TMUX") else "attach-session"
-        os.execvp("tmux", ["tmux", action, "-t", "=" + name])
+        target = setup_team(root, args.projects, settings_for(args, "orchestrator"),
+                            settings_for(args, "worker"), args.new_team, attach_target=True)
+        control["attach"](*target)
     except StartupError as error:
         parser.exit(1, str(error) + "\n")
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):

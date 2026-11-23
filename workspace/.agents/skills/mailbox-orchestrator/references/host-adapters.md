@@ -14,21 +14,29 @@ In the skills, "thread" means one host session or conversation, whatever the hos
 
 `AGENTS.md` and `.agents/skills/` are the single source. `.claude/skills/<skill>` and `.github/skills/<skill>` are per-skill symlinks to `.agents/skills/<skill>`; never copy a skill into them. When adding a skill, add both links. Skill directory names equal the frontmatter `name` (lowercase letters, digits, hyphens; at most 64 characters) and descriptions stay under 1024 characters, the strictest limits among the three hosts.
 
+## Starting a team
+
+After `make setup`, open a new terminal and run `team` from any directory. On Windows, run setup in the WSL 2 checkout and open the installed command in PowerShell, Command Prompt or that WSL distribution.
+
+Select one or more projects, then set the worker count for each project. Choose a harness, model and reasoning effort for the orchestrator, then choose them separately for the workers. The worker configuration applies to every worker in this team. The menu reads the installed harness's model catalog. Press `R` on the model screen to refresh it or enter a model ID directly.
+
+For a scripted launch, run the launcher below from the installed mailbox root. This example starts one Claude Code orchestrator and two Codex workers in the same registered project. Replace both occurrences of `app` with your project ID.
+
+```sh
+./copilot-mailbox/team --orchestrator-harness claude --worker-harness codex app app
+```
+
+Use `--orchestrator-model` and `--worker-model` to pass different model IDs, and `--orchestrator-effort` and `--worker-effort` for their reasoning levels. Omit model and effort flags to use the launcher defaults. New participants inherit the launching shell's provider configuration directories.
+
+Enter the objective in the orchestrator window. For example, ask each selected worker to report its current branch and HEAD commit, then ask the orchestrator to verify the replies. Use the default tmux binding `Ctrl-b` then `w` to visit each participant for any first-run trust prompts. Detach with `Ctrl-b` then `d`. Open `team` again to reconnect, stop a worker or stop the whole team.
+
+Across hosts, a published mailbox file carries the message. A running Copilot mailbox listener can notify its own session. For a recipient without an available notification tool, relay the file path and ask it to check its inbox. A correlated reply confirms receipt. See [Session messaging](#session-messaging) for the host-specific tools.
+
 ## Starting Copilot CLI
 
 ### Autonomous CLI sessions
 
-From the installed mailbox root, list the project IDs you want to work with in one command. The team launcher uses tmux and opens the coordinator in the foreground with one window per requested worker. Repeat a project ID to start additional workers for that project, or use the interactive `team` menu and adjust the count with `+` and `-`. Each window uses the registered project directory and its own session endpoint.
-
-```sh
-./copilot-mailbox/team <project-id> [another-project-id ...]
-```
-
-The team command starts fresh Copilot processes for a new team. Use the separate participant commands below to resume a particular existing CLI session. The team uses Copilot model selection `auto` by default; pass `--model <name>` to select a different model at startup.
-
-Enter your task in the coordinator window. On first use, visit the worker windows to answer any Copilot folder-trust prompts. With the default tmux bindings, press `Ctrl-b` then `w` to choose a window and `Ctrl-b` then `d` to detach. Running the same team command returns you to the existing team. Detaching leaves Copilot running. To end a participant, use `/exit` in its Copilot window.
-
-To manage the two roles in separate terminals, use the participant launcher directly:
+The team menu starts the selected participants together. To launch Copilot roles in separate terminals or resume a specific Copilot session, use the participant launcher from the installed mailbox root.
 
 ```sh
 ./copilot-mailbox/start worker <project-id>
@@ -39,7 +47,7 @@ Each coordinator `--project` grants that registered directory to Copilot for ver
 
 Give the coordinator the objective once, in its terminal or with `--objective "…"` at launch. For a first check, ask it to register the worker, assign a read-only task through the project loop to report its branch and full HEAD SHA, then verify the returned evidence. You can leave both terminals open for subsequent tasks.
 
-The launcher loads a local experimental Copilot CLI extension into each session. The worker extension publishes a non-executable registration offer carrying its own host ID. The coordinator sends an addressed registration request. Only a correlated response confirms the worker. The extension queues a notification in its own Copilot session when a mailbox message arrives. The worker validates gated execution requests and sends the evidence back. The coordinator wakes to verify the reply. The same file delivery works for messages published by other hosts.
+The launcher loads a local experimental Copilot CLI extension into each session. The worker extension publishes a non-executable registration offer carrying its own host ID. The coordinator sends an addressed registration request. Only a correlated response confirms the worker. The extension queues a notification in its own Copilot session when a mailbox message arrives. The worker validates gated execution requests and sends the evidence back. The coordinator wakes to verify the reply. The listener also receives eligible mailbox messages published by other hosts.
 
 The launcher preserves the operator’s tool policy. Incoming messages trigger a turn even when native Autopilot is disabled. Use `--autopilot` to enable Copilot’s additional continuation turns. Review the CLI’s trust prompt on first use and grant the tools needed for the intended work using normal Copilot controls or repeatable `--allow-tool` rules. The launcher accepts `--model auto`, `--sync-session off` and `--resume <session-uuid>`. Resume in the same role and directory to receive pending work addressed to that ID. The listener runs for the lifetime of its Copilot process. Only one autonomous coordinator can own the orchestrator inbox at a time. Untagged legacy replies received during coordinator downtime require an inbox check when their original request names no coordinator session. A fresh worker session registers a new endpoint and requires a fresh dispatch for its own ID.
 

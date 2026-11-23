@@ -26,7 +26,10 @@ def settings(harness='copilot', model=None, effort=None):
 def snapshot(*projects):
     panes = {'orchestrator': '%20'}
     panes.update({name: '%' + str(21 + i) for i, name in enumerate(projects)})
-    return dict(projects=projects, session='$1', panes=panes, token='abcd' * 8, can_stop=True)
+    token = 'abcd' * 8
+    identities = {pane: f'$1|100|123|200|{token}|{token}|{role}|200' for role, pane in panes.items()}
+    return dict(projects=projects, session='$1', socket=None, panes=panes, token=token,
+                identities=identities, can_stop=True)
 
 
 class TeamUiTests(unittest.TestCase):
@@ -198,17 +201,23 @@ for message in [
                 return subprocess.CompletedProcess(args, 0, panes, '')
             return subprocess.CompletedProcess(args, 0, '', '')
         lock = self.root / '.copilot-mailbox-orchestrator.lock'
-        panes = '$1|%20|0|orchestrator|alpha,beta\n$1|%21|0|alpha|alpha,beta\n$1|%22|0|beta|alpha,beta\n'
+        panes = ('$1|%20|0|orchestrator|alpha,beta|||100|123|200|\n'
+                 '$1|%21|0|alpha|alpha,beta|||100|123|201|\n$1|%22|0|beta|alpha,beta|||100|123|202|\n')
         with patch('subprocess.run', side_effect=tmux), lock.open('w') as handle:
             self.assertIsNone(self.data.active_team(self.root))
             fcntl.flock(handle, fcntl.LOCK_EX)
             observed = self.data.active_team(self.root)
-            self.assertEqual(observed, (('alpha', 'beta'), '$1', '%20'))
+            self.assertEqual(observed[:3], (('alpha', 'beta'), '$1', '%20'))
             with patch.dict(os.environ, {'TMUX': ''}), patch('os.execvp') as reconnect:
                 self.data.reconnect(self.root, observed)
-                reconnect.assert_called_once_with('tmux', ['tmux', 'attach-session', '-t', '$1'])
+                reconnect.assert_called_once()
+                invocation = reconnect.call_args.args[1]
+                self.assertIn('if-shell', invocation)
+                self.assertIn('attach-session', invocation[-2])
+                self.assertIn('$1', invocation[-2])
             original = panes
-            for replacement in (original.replace('$1', '$2'), original.replace('%20', '%40')):
+            for replacement in (original.replace('$1', '$2'), original.replace('%20', '%40'),
+                                original.replace('|100|123|', '|101|124|')):
                 panes = replacement
                 with patch('os.execvp') as attach, self.assertRaises(ValueError):
                     self.data.reconnect(self.root, observed)

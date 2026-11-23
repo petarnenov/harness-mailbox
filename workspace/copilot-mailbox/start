@@ -21,9 +21,13 @@ def read_registry(root):
         if len(data) != info.st_size:
             raise ValueError
     try:
-        return json.loads(data.decode("utf-8"))
+        registry = json.loads(data.decode("utf-8"))
     except RecursionError:
         raise ValueError("Invalid registry nesting") from None
+    entries = registry.get("projects", registry) if isinstance(registry, dict) else registry
+    if not isinstance(entries, (dict, list)):
+        raise ValueError("Invalid project registry")
+    return registry
 
 
 def working_directory(registry, project):
@@ -137,6 +141,8 @@ def native_command(args, worker, directories):
             "When a project has multiple workers, partition assignments by registered endpoint. "
             "Await the user's objective before dispatching project work."
         )
+        if args.access_projects:
+            prompt += " Selected project IDs: " + ", ".join(dict.fromkeys(args.access_projects)) + "."
         if args.objective:
             prompt += "\nUser objective: " + args.objective
     if args.harness == "codex":

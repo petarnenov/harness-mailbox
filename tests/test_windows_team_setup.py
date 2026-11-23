@@ -72,8 +72,8 @@ class WindowsShimTests(unittest.TestCase):
         except FileNotFoundError:
             return None
 
-    def invoke(self, check, distro='Fixture Distro'):
-        env = dict(os.environ, LOCALAPPDATA=str(self.local), HARNESS_TEAM_DISTRO=distro,
+    def invoke(self, check, distro='Fixture Distro', user='fixture-account'):
+        env = dict(os.environ, LOCALAPPDATA=str(self.local), HARNESS_TEAM_DISTRO=distro, HARNESS_TEAM_USER=user,
                    HARNESS_TEAM_CHECK='1' if check else '0', TEAM_TEST_HIVE=self.key_name,
                    TEAM_TEST_INSTALLER=str(INSTALLER))
         result = subprocess.run([self.shell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
@@ -90,12 +90,15 @@ class WindowsShimTests(unittest.TestCase):
         self.assertEqual(self.invoke(check=False), 0)
         original = self.shim.read_bytes()
         self.assertIn(b'--distribution "Fixture Distro"', original)
+        self.assertIn(b'--user "fixture-account"', original)
         self.assertIn(b'--exec /usr/bin/env python3 .local/bin/team --from-windows', original)
         self.assertEqual(self.user_path(self.env_key), str(self.bin))
         self.assertEqual(self.invoke(check=True), 0)
         self.assertEqual(self.invoke(check=False), 0)
         self.assertEqual(self.user_path(self.env_key), str(self.bin))
         self.assertNotEqual(self.invoke(check=True, distro='Other Distro'), 0)
+        self.assertNotEqual(self.invoke(check=True, user='other-account'), 0)
+        self.assertNotEqual(self.invoke(check=False, user='other-account'), 0)
         self.assertEqual(self.shim.read_bytes(), original)
 
         import winreg
@@ -109,3 +112,16 @@ class WindowsShimTests(unittest.TestCase):
         self.assertNotEqual(self.invoke(check=True), 0)
         self.assertNotEqual(self.invoke(check=False), 0)
         self.assertEqual(self.shim.read_bytes(), b'@echo foreign command\r\n')
+
+    def test_upgrading_a_generated_legacy_shim_pins_the_installing_account(self):
+        self.bin.mkdir(parents=True)
+        prefix = b'@echo off\r\n"%SystemRoot%\\System32\\wsl.exe" --distribution "Fixture Distro" --cd ~ --exec '
+        for command in (b'/usr/bin/env python3 .local/bin/team --from-windows', b'/bin/sh -lc "exec ~/.local/bin/team"'):
+            with self.subTest(command=command):
+                legacy = prefix + command + b'\r\nexit /b %errorlevel%\r\n'
+                self.shim.write_bytes(legacy)
+                self.assertNotEqual(self.invoke(check=True), 0)
+                self.assertEqual(self.shim.read_bytes(), legacy)
+                self.assertEqual(self.invoke(check=False), 0)
+                self.assertIn(b'--user "fixture-account"', self.shim.read_bytes())
+                self.assertEqual(self.invoke(check=True), 0)

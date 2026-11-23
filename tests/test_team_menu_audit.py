@@ -56,11 +56,11 @@ class TeamMenuAuditTests(unittest.TestCase):
         with (patch.object(self.data, 'managed_team', return_value=active),
               patch('subprocess.run') as tmux, patch('os.execvp') as attach):
             self.data.reconnect(WORKSPACE, active)
-        calls = [call.args[0] for call in tmux.call_args_list]
-        commands = [word for argv in calls for word in argv]
-        select_pane = commands.index('select-pane')
-        self.assertEqual(commands[select_pane + 1:select_pane + 3], ['-t', active['panes']['orchestrator']])
+        tmux.assert_not_called()
         attach.assert_called_once()
+        command = attach.call_args.args[1]
+        self.assertIn('if-shell', command)
+        self.assertIn('select-pane -t ' + active['panes']['orchestrator'], command[-2])
 
     def test_retired_session_with_foreign_pane_allows_removal_unless_coordinator_lock_is_held(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -82,6 +82,113 @@ class TeamMenuAuditTests(unittest.TestCase):
                 self.assertEqual(self.data.projects(root), ['sample'])
                 self.data.remove_project(root, 'sample', confirmation)
                 self.assertEqual(self.data.projects(root), [])
+
+    def test_removal_keeps_each_route_bound_to_its_original_project(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            original = root / 'original'
+            other = root / 'other'
+            original.mkdir()
+            other.mkdir()
+            entries = [{'id': name, 'working_directory': str(original)} for name in ('sample', 'alias')]
+            (root / 'projects.json').write_text(json.dumps({'projects': entries}))
+            history = root / 'tasks/sample/task.json'
+            history.parent.mkdir(parents=True)
+            history.write_text('{"existing": true}')
+            with (patch.object(self.data, 'managed_team', return_value=None),
+                  patch.object(self.data, '_unidentified_team', return_value=False)):
+                self.data.remove_project(root, 'sample', self.data.removal_snapshot(root, 'sample'))
+            self.assertEqual(self.data.projects(root), [])
+            for route in ('sample', 'ALIAS'):
+                with self.subTest(route=route), self.assertRaises(ValueError):
+                    self.data.add_project(root, other, route)
+            self.assertEqual(self.data.add_project(root, other, 'independent'), 'independent')
+            self.assertEqual(self.data.add_project(root, original, 'sample'), 'sample')
+            self.assertEqual(history.read_text(), '{"existing": true}')
+
+    def test_preexisting_orphan_mailbox_data_reserves_its_route(self):
+        for tree in ('inbox', 'tasks'):
+            with self.subTest(tree=tree), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                route = root / tree / 'retired'
+                route.mkdir(parents=True)
+                (route / 'history.json').write_text('{}')
+                project = root / 'new'
+                project.mkdir()
+                (root / 'projects.json').write_text('{}')
+                with self.assertRaises(ValueError):
+                    self.data.add_project(root, project, 'retired')
+                self.assertEqual(self.data.projects(root), [])
+                self.assertEqual(self.data.add_project(root, project, 'fresh'), 'fresh')
+
+    def test_retired_route_follows_the_original_directory_when_replaced_at_old_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / 'project'
+            project.mkdir()
+            (root / 'projects.json').write_text('[]')
+            self.data.add_project(root, project, 'sample')
+            with (patch.object(self.data, 'managed_team', return_value=None),
+                  patch.object(self.data, '_unidentified_team', return_value=False)):
+                self.data.remove_project(root, 'sample', self.data.removal_snapshot(root, 'sample'))
+            moved = root / 'moved'
+            project.rename(moved)
+            project.mkdir()
+            with self.assertRaises(ValueError):
+                self.data.add_project(root, project, 'sample')
+            self.assertEqual(self.data.add_project(root, moved, 'sample'), 'sample')
+            self.assertEqual(self.data.removal_snapshot(root, 'sample')['working_directory'], str(moved))
+
+    def test_failed_retirement_publication_preserves_registry_and_can_be_retried(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            registry = root / 'projects.json'
+            original = json.dumps([{'id': 'kept', 'working_directory': str(root)}])
+            registry.write_text(original)
+            confirmation = self.data.removal_snapshot(root, 'kept')
+            with (patch.object(self.data, 'managed_team', return_value=None),
+                  patch.object(self.data, '_unidentified_team', return_value=False)):
+                with patch.object(self.data, '_publish_registry', side_effect=OSError('synthetic exception')):
+                    with self.assertRaises(ValueError) as error:
+                        self.data.remove_project(root, 'kept', confirmation)
+                    self.assertNotIn('synthetic exception', str(error.exception))
+                self.assertEqual(registry.read_text(), original)
+                self.data.remove_project(root, 'kept', confirmation)
+                self.assertEqual(self.data.projects(root), [])
+            self.assertEqual(self.data.add_project(root, root, 'kept'), 'kept')
+
+    def test_legacy_session_name_uses_record_to_distinguish_project_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / 'new'
+            project.mkdir()
+            sessions = root / 'sessions'
+            sessions.mkdir()
+            registry = root / 'projects.json'
+            registry.write_text('[]')
+            record = sessions / 'alpha--api--worker.json'
+            for old in ('alpha', 'alpha--api'):
+                with self.subTest(old=old):
+                    record.write_text(json.dumps({'project': old}))
+                    with self.assertRaises(ValueError):
+                        self.data.add_project(root, project, old)
+            self.assertEqual(self.data.add_project(root, project, 'alpha'), 'alpha')
+
+    def test_legacy_epic_only_project_history_reserves_its_route(self):
+        cases = [('issues.json', {'issues': [{'key': 'FIX-1', 'affected_projects': ['archived']}]}),
+                 ('progress.json', {'per_project': {'other': {'project_metrics': [{'project': 'archived'}]}}})]
+        for name, record in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                project = root / 'new'
+                project.mkdir()
+                epic = root / 'epics/FIX-1'
+                epic.mkdir(parents=True)
+                (epic / name).write_text(json.dumps(record))
+                (root / 'projects.json').write_text('[]')
+                with self.assertRaises(ValueError):
+                    self.data.add_project(root, project, 'ARCHIVED')
+                self.assertEqual(self.data.add_project(root, project, 'fresh'), 'fresh')
 
     def test_missing_wsl_account_has_a_fixed_error(self):
         with (patch.object(sys, 'argv', ['team', '--from-windows']),

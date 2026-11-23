@@ -16,7 +16,7 @@ Read README.md before using this workspace. Project workers identify their proje
 
 ## Supported agent hosts
 
-Codex, Claude Code and GitHub Copilot share the mailbox protocol. For independent Copilot CLI sessions, relay the exact inbox message path to the receiving worker. Follow the [Copilot walkthrough](.agents/skills/mailbox-orchestrator/references/host-adapters.md#starting-copilot-cli) for registration and verification. Invoke a skill by name with your host's syntax: `$<skill>` in Codex, `/<skill>` in Claude Code and Copilot. Skills, entry files and per-host session tools are described in `.agents/skills/mailbox-orchestrator/references/host-adapters.md`. `.agents/skills/` is the single source of the skills; other host locations only link to it.
+Codex, Claude Code and GitHub Copilot share the mailbox protocol. Start any combination of these hosts with the [team launcher](.agents/skills/mailbox-orchestrator/references/host-adapters.md#starting-a-team). A launched Copilot listener can notify its own session. For manual Copilot sessions, relay the exact inbox message path to the recipient. Follow the [Copilot walkthrough](.agents/skills/mailbox-orchestrator/references/host-adapters.md#starting-copilot-cli) for registration and verification. Invoke a skill by name with your host's syntax: `$<skill>` in Codex, `/<skill>` in Claude Code and Copilot. Skills, entry files and per-host session tools are described in `.agents/skills/mailbox-orchestrator/references/host-adapters.md`. `.agents/skills/` is the single source of the skills; other host locations only link to it.
 
 ## Orchestrator skill
 

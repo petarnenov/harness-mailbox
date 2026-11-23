@@ -600,3 +600,51 @@ test('a failed discovery offer does not suppress a pending addressed notificatio
   assertPointer(accepted, 'sample', REQUEST);
   assert.equal(offers, 1);
 });
+
+test('a fresh role-only reply stays with the coordinator that sent its request', async t => {
+  const box = await mailbox(t);
+  const archived = join(box.root, 'archive', 'sample');
+  await mkdir(archived, { recursive: true });
+  await writeFile(join(archived, REQUEST + '.json'), JSON.stringify(
+    registration({ from: { project: 'orchestrator', session_id: COORDINATOR } })));
+  await box.publish('orchestrator', result({ in_reply_to: REQUEST }));
+  const other = await relay(box, { cwd: box.root, route: 'orchestrator', sessionId: TASK });
+  await other.receiver.poll();
+  assert.deepEqual(other.notifications, []);
+  const owner = await relay(box, { cwd: box.root, route: 'orchestrator', sessionId: COORDINATOR });
+  await owner.receiver.poll();
+  assertPointer(owner.notifications, 'orchestrator', REPLY);
+});
+
+test('a batch rechecks queued records after the preceding notification is delivered', async t => {
+  for (const change of ['archive', 'recipient', 'registry']) {
+    await t.test(change, async t => {
+      const box = await mailbox(t);
+      await box.publish('sample', registration());
+      const second = registration({ id: REPLY, created_at: '2026-01-02T00:00:00Z' });
+      const path = await box.publish('sample', second);
+      const notifications = [];
+      const { receiver } = await relay(box, { send: async notification => {
+        notifications.push(notification);
+        if (notifications.length !== 1) return;
+        if (change === 'archive') {
+          const dir = join(box.root, 'archive', 'sample');
+          await mkdir(dir, { recursive: true });
+          await rename(path, join(dir, REPLY + '.json'));
+        } else if (change === 'recipient') {
+          await box.publish('sample', { ...second, intended_endpoint: COORDINATOR });
+        } else {
+          await writeFile(join(box.root, 'projects.json'), JSON.stringify({ projects: [] }));
+        }
+      } });
+      try {
+        await receiver.poll();
+      } catch (error) {
+        if (change !== 'registry') throw error;
+        // Revoking the worker's route can also abort the rest of the poll.
+        assert.equal(error.message, 'Copilot could not deliver a mailbox notification. It will retry.');
+      }
+      assertPointer(notifications, 'sample', REQUEST);
+    });
+  }
+});

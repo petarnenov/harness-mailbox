@@ -26,9 +26,17 @@ if args[0] == 'ps':
         sys.exit(1)
     state = pathlib.Path(os.environ['DASHBOARD_STATE'])
     if state.exists():
-        print(state.read_text() + ' ' + os.environ.get('SERVICE_OWNER', os.getcwd()))
+        prefix = 'abcde1234567 ' if '{{.ID}}' in args[-1] else ''
+        print(prefix + state.read_text() + ' ' + os.environ.get('SERVICE_OWNER', os.getcwd()))
     if os.environ.get('ONEOFF') and 'label=com.docker.compose.oneoff=False' not in args:
         print('running ' + os.getcwd())
+if args[0] == 'inspect':
+    if args[-1] != 'abcde1234567':
+        sys.exit(1)
+    # The Docker inspect template should prefer the client-visible label on desktop engines.
+    label = os.environ.get('SERVICE_LABEL') if 'io.harness-mailbox.root' in args[2] else None
+    mount = os.environ.get('SERVICE_DATA', os.environ.get('MAILBOX_ROOT', ''))
+    print(label or mount)
 if args[:2] == ['compose', 'version']:
     sys.exit(int(os.environ.get('FAIL_COMPOSE', '0')))
 if args[0] == 'compose':
@@ -145,6 +153,53 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(state.read_text(), status)
                 self.assertFalse(any('up' in call['args'] for call in self.calls()))
 
+    def open_team_dashboard(self, mailbox):
+        plugin = Path(__file__).resolve().parents[1] / 'workspace/copilot-mailbox'
+        with patch.object(sys, 'path', [str(plugin), *sys.path]):
+            import team_ui_data
+        return team_ui_data.ensure_dashboard(mailbox)
+
+    def test_team_dashboard_uses_its_mailbox_despite_a_different_saved_or_exported_root(self):
+        selected = self.root / 'selected'
+        selected.mkdir()
+        (selected / 'dashboard').symlink_to(self.app, target_is_directory=True)
+        (selected / 'projects.json').write_text('[]')
+        config = f"MAILBOX_ROOT='{self.root}'\n"
+        (self.app / '.env').write_text(config)
+        for previous in ({}, {'MAILBOX_ROOT': str(self.root)}):
+            with self.subTest(previous=previous):
+                state = self.app / 'state'
+                state.unlink(missing_ok=True)
+                self.log.unlink(missing_ok=True)
+                with patch.dict(os.environ, dict(self.env, DASHBOARD_STATE=str(state), **previous), clear=True):
+                    self.assertTrue(self.open_team_dashboard(selected))
+                start, = [c for c in self.calls() if 'up' in c['args']]
+                self.assertEqual(start['root'], str(selected))
+                self.assertEqual((self.app / '.env').read_text(), config)
+
+    def test_team_does_not_adopt_or_restart_a_service_displaying_another_mailbox(self):
+        state = self.app / 'state'
+        foreign = self.root / 'different mailbox'
+        foreign.mkdir()
+        for status in ('running', 'exited'):
+            with self.subTest(status=status):
+                state.write_text(status)
+                self.log.unlink(missing_ok=True)
+                with patch.dict(os.environ, dict(self.env, DASHBOARD_STATE=str(state),
+                                                 SERVICE_DATA=str(foreign)), clear=True):
+                    self.assertFalse(self.open_team_dashboard(self.root))
+                self.assertFalse(any('up' in c['args'] for c in self.calls()))
+                self.assertEqual(state.read_text(), status)
+
+    def test_team_recognizes_the_client_mailbox_label_for_a_desktop_bind_mount(self):
+        state = self.app / 'state'
+        state.write_text('running')
+        settings = dict(self.env, DASHBOARD_STATE=str(state), SERVICE_DATA='/vm/private/mount',
+                        SERVICE_LABEL=str(self.root))
+        with patch.dict(os.environ, settings, clear=True):
+            self.assertTrue(self.open_team_dashboard(self.root))
+        self.assertFalse(any('up' in c['args'] for c in self.calls()))
+
     def test_unknown_dashboard_status_cannot_start_a_container(self):
         result = self.run_workflow('ensure-dashboard', DASHBOARD_STATE=str(self.app / 'state'), FAIL_STATUS='1')
         self.assertNotEqual(result.returncode, 0)
@@ -182,6 +237,19 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue(all(future.result(timeout=10) for future in futures))
         self.assertEqual((self.app / 'state').read_text(), 'running')
         self.assertEqual(sum('up' in call['args'] for call in self.calls()), 1)
+
+    def test_setup_and_doctor_reject_an_unreadable_project_registry_without_replacing_it(self):
+        self.assertEqual(self.run_workflow('setup').returncode, 0)
+        registry = self.root / 'projects.json'
+        path = f"{self.bin}:{self.env['PATH']}"
+        for invalid in ('{"private-fixture-detail"', 'null', '{"projects":7}'):
+            registry.write_text(invalid)
+            for action in ('doctor', 'setup'):
+                with self.subTest(invalid=invalid, action=action):
+                    result = self.run_workflow(action, PATH=path)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn('private-fixture-detail', result.stdout + result.stderr)
+                    self.assertEqual(registry.read_text(), invalid)
 
     def test_doctor_is_read_only_and_reports_dependencies(self):
         result = self.run_workflow('setup')

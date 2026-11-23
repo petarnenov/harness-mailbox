@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import runpy
 import shutil
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -41,7 +42,7 @@ class CopilotTeamTests(unittest.TestCase):
         errors = io.StringIO()
         environment = {'PATH': os.defpath}
         if inside_tmux:
-            environment['TMUX'] = '/tmp/synthetic-tmux,123,0'
+            environment['TMUX'] = f'{self.server.socket_path},123,0'
         if pane is not None:
             environment['TMUX_PANE'] = pane
         with (patch.dict(self.program.__globals__, __file__=str(self.binary)),
@@ -80,9 +81,10 @@ class CopilotTeamTests(unittest.TestCase):
             self.assertEqual(worker[:2], ('--launch-pane', 'worker'))
             self.assertEqual(worker[worker.index('--model') + 1], 'auto')
         self.assertFalse(any('unselected' in call or '--allow-all' in call for call in calls))
-        self.assertIn('attach-session', attached.call_args.args[1])
-        focused, = [call for call in calls if call[0] == 'select-window']
-        self.assertEqual(focused[focused.index('-t') + 1], '%0')
+        handoff = attached.call_args.args[1]
+        self.assertIn('if-shell', handoff)
+        self.assertIn('attach-session', handoff[-2])
+        self.assertIn('select-window -t %0', handoff[-2])
 
     def test_repeat_with_same_projects_in_reverse_order_only_switches_to_existing_team(self):
         result, errors, _ = self.invoke('beta.v2', 'alpha', '--model', 'example-model',
@@ -98,7 +100,7 @@ class CopilotTeamTests(unittest.TestCase):
         self.server.calls.clear()
         result, errors, attached = self.invoke('alpha', 'beta.v2', inside_tmux=True)
         self.assertEqual(result, 0, errors)
-        self.assertIn('switch-client', attached.call_args.args[1])
+        self.assertIn('switch-client', attached.call_args.args[1][-2])
         self.assertEqual(self.server.projects, prior)
         self.assertFalse(any(c[0] in ('new-session', 'new-window', 'rename-session', 'kill-session')
                              for c in self.server.calls))
@@ -343,6 +345,10 @@ class TmuxDouble:
     """Record the executable boundary; no real server, subprocesses or shell parsing."""
     def __init__(self, root):
         self.root = root
+        self.socket_dir = tempfile.TemporaryDirectory(dir='/tmp')
+        self.socket_path = Path(self.socket_dir.name) / 'fixture socket'
+        with socket.socket(socket.AF_UNIX) as stub:
+            stub.bind(str(self.socket_path))
         self.owner = None
         self.calls = []
         self.projects = None
@@ -352,6 +358,7 @@ class TmuxDouble:
         self.panes = {}
 
     def close(self):
+        self.socket_dir.cleanup()
         if self.owner is not None:
             self.owner.close()
             self.owner = None
@@ -361,6 +368,10 @@ class TmuxDouble:
         if executable != "tmux":
             raise AssertionError(executable)
         args = tuple(map(str, rest))
+        if args[:1] == ('-S',):
+            if args[1] != str(self.socket_path):
+                raise AssertionError('Unexpected tmux server selected')
+            args = args[2:]
         self.calls.append(args)
         command = args[0]
         stdout = ''
@@ -372,6 +383,9 @@ class TmuxDouble:
             self.owner = (self.root / '.copilot-mailbox-orchestrator.lock').open('a')
             fcntl.flock(self.owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.panes['%0'] = (0, 'orchestrator' if self.coordinator_starts else '')
+        elif command == 'display-message':
+            token = 'ab' * 16
+            stdout = f'$7|100|123|200|{token}|{token}|orchestrator|200 {self.socket_path}\n'
         elif command == 'new-window':
             pane = '%' + str(len(self.panes))
             self.panes[pane] = (0, args[args.index('-n') + 1])

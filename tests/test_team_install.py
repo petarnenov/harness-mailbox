@@ -35,6 +35,9 @@ class TeamInstallTests(unittest.TestCase):
         (self.tools / "python3").symlink_to(sys.executable)
         for name in ("cat", "dirname", "grep", "ln", "mkdir"):
             (self.tools / name).symlink_to(shutil.which(name))
+        account = self.tools / "id"
+        account.write_text('#!/bin/sh\n[ "$1" = "-un" ] || exit 1\nprintf "fixture-account\\n"\n')
+        account.chmod(0o755)
         self.env = {"PATH": str(self.tools), "HOME": str(self.home), "SHELL": "/bin/sh",
                     "PYTHONDONTWRITEBYTECODE": "1", "LC_ALL": "C"}
 
@@ -161,7 +164,7 @@ class TeamInstallTests(unittest.TestCase):
         powershell = self.tools / "powershell.exe"
         powershell.write_text(
             '#!/bin/sh\n'
-            'printf "%s\\n" "$HARNESS_TEAM_DISTRO" "$WSLENV" "$@" > "$HOME/invocation"\n'
+            'printf "%s\\n" "$HARNESS_TEAM_DISTRO" "$WSLENV" "$HARNESS_TEAM_USER" "$@" > "$HOME/invocation"\n'
             'cat > "$HOME/input"\n'
             'printf "private fixture error\\n" >&2\n'
             'exit "$MOCK_STATUS"\n'
@@ -177,12 +180,25 @@ class TeamInstallTests(unittest.TestCase):
                 self.assertEqual(args[0], "Example Linux")
                 self.assertIn("HARNESS_TEAM_DISTRO/w", args[1].split(":"))
                 self.assertIn("EXISTING/u", args[1].split(":"))
+                self.assertIn("HARNESS_TEAM_USER/w", args[1].split(":"))
+                self.assertEqual(args[2], "fixture-account")
                 self.assertEqual(args[-2:], ["-Command", "-"])
                 self.assertEqual((self.home / "input").read_bytes(),
                                  (self.helper / "install-windows-command.ps1").read_bytes())
                 if status != "0":
                     self.assertIn("Windows", result.stderr)
                     self.assertNotIn("private fixture error", result.stderr)
+
+    def test_wsl_cannot_register_an_unknown_linux_account(self):
+        (self.tools / "id").write_text('#!/bin/sh\nprintf "fixture-private-error\\n" >&2\nexit 1\n')
+        powershell = self.tools / "powershell.exe"
+        powershell.write_text('#!/bin/sh\n: > "$HOME/invoked"\n')
+        powershell.chmod(0o755)
+        self.env["WSL_DISTRO_NAME"] = "Fixture Distro"
+        result = self.shell(self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr.strip(), "Cannot identify the Linux account that owns team.")
+        self.assertFalse((self.home / "invoked").exists())
 
     def test_wsl_check_requests_read_only_windows_validation_and_propagates_the_result(self):
         self.assertEqual(self.shell(self.script).returncode, 0)

@@ -27,6 +27,12 @@ sessions
 inbox
 outbox
 archive
+.copilot-mailbox-tmux-socket
+.copilot-mailbox-team.lock
+.copilot-mailbox-orchestrator.lock
+.team-registry.lock
+.team-registry-*
+.team-socket-*
 discovery
 
 .coverage-output

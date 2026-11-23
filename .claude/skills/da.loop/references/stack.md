@@ -7,7 +7,7 @@ Verified from repository files on 2026-11-23. Recheck `Makefile`, `scripts/workf
 - Built-in dashboard component of the harness-mailbox coordination workspace; Git checkout scoped to `dashboard/` (remote `github.com/petarnenov/harness-mailbox`, default branch `main`). The parent mailbox directory is not a Git repository and its records never enter this one.
 - Backend: Python 3.13 standard library only (`python:3.13-slim`). `server.py` is a read-only `ThreadingHTTPServer` serving `/api/dashboard`, `/healthz` and four static files; mutating methods return `405 read_only`. `dependency_graph.py` builds the shared dependency graph; `delivery_process.py` projects delivery stages; `dispatch_gate.py` is the orchestrator's dependency-gate CLI (`check`, `dispatch`, `validate`) and is not exposed over HTTP.
 - Frontend: buildless vanilla JavaScript, HTML and CSS in `static/` (`app.js`, `theme.js`, `index.html`, `style.css`); CSP forbids inline script.
-- Workspace template: `workspace/` tracks the mailbox `AGENTS.md`/`CLAUDE.md`, templates and the `mailbox-orchestrator`/`mailbox-register-sessions` skills, including Python scripts (`dispatch_task.py`, `jira_sync.py`, `aio_sync.py`, `reconcile_sessions.py`, …) with `test_*.py` beside them. `workspace.Makefile` becomes the parent's forwarding `Makefile`.
+- Workspace template: `workspace/` ships the interactive `team` menu and the launchers and Copilot extension in `copilot-mailbox/`. It also tracks the mailbox `AGENTS.md`/`CLAUDE.md`, templates and the `mailbox-orchestrator`/`mailbox-register-sessions` skills, including Python scripts (`dispatch_task.py`, `jira_sync.py`, `aio_sync.py`, `reconcile_sessions.py`, …) with `test_*.py` beside them. `workspace.Makefile` becomes the parent's forwarding `Makefile`.
 - Demo data: `demo/` holds synthetic mailbox records for `make demo` and `?mode=demo`.
 - Runtime: one container from `Dockerfile`, published by `compose.yaml` on `127.0.0.1:17171`, read-only root filesystem, tmpfs `/tmp`, `cap_drop: ALL`, `no-new-privileges`, non-root user `65534`, mailbox mounted read-only at `/data` from `MAILBOX_ROOT` in the ignored `.env`.
 - Authority: `README.md` for dashboard behavior; the workspace `AGENTS.md` and `mailbox-orchestrator` references (`delivery-protocol.md`, `dependency-gate.md`, `host-adapters.md`) for the mailbox protocol, Jira/AIO write limits and gates.
@@ -18,8 +18,9 @@ Run from the repository root (`dashboard/`); the parent mailbox's `Makefile` for
 
 | Purpose | Command | Evidence |
 | --- | --- | --- |
-| Install system tools and images | `make setup` | may need administrator rights; preserves `.env` and root `Makefile` |
-| Check dependencies and configuration | `make doctor` / `make doctor-deps` | read-only |
+| Install team and prepare the dashboard | `make setup` | installs missing system dependencies, deploys the launcher to the selected mailbox and builds the dashboard |
+| Diagnose the installation | `make doctor` | read-only checks for the launcher, PATH, runtime, registry and Docker |
+| Check Docker alone | `make doctor-deps` | checks Docker CLI, Compose and daemon |
 | Build / start / restart | `make build` / `make up` / `make restart` | dashboard at http://localhost:17171 |
 | Health / status / logs | `make health` / `make status` / `make logs` | `/healthz` probe |
 | Demo | `make demo` | synthetic data, `.env` unchanged |
@@ -38,6 +39,8 @@ Do not substitute host Python or Node runs as gate evidence; local installations
 - Every touched production module must reach at least 85% measured line coverage; report per-module figures from `.coverage-output/coverage.json`.
 - TODO(target): no Make target measures JavaScript coverage. Until one exists, record a `node --test --experimental-test-coverage tests/js/*.test.mjs` run in the isolated Node image as evidence, or state `unavailable`.
 
+The [Team setup workflow](../../../../.github/workflows/team-setup.yml) runs setup, workflow and launcher regressions on macOS and Ubuntu for pushes and pull requests. Its Windows job exercises PowerShell registration and diagnostics. Full interactive WSL 2 sessions are outside that job.
+
 ## Safety invariants
 
 - The server never writes mailbox data, never calls Jira, AIO or other networks and holds no credentials.
@@ -49,4 +52,4 @@ Do not substitute host Python or Node runs as gate evidence; local installations
 
 ## Unknowns to preserve
 
-No CI pipeline, release process or issue-tracker project is configured for this repository. Do not invent CI commands, ticket keys or deployment targets; record `TODO(target)` where a task needs one.
+No release process or issue-tracker project is configured for this repository. Do not invent CI commands, ticket keys or deployment targets; record `TODO(target)` where a task needs one.
