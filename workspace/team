@@ -1,0 +1,764 @@
+#!/usr/bin/env python3
+"""Interactive terminal for choosing a mailbox team."""
+from collections import Counter
+import curses
+import os
+import pwd
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "copilot-mailbox"))
+import team_ui_data as data  # noqa: E402
+
+
+HOSTS = {"copilot": "GitHub Copilot", "claude": "Claude Code", "codex": "Codex"}
+DEFAULT = "Default"
+MANUAL = object()
+ADD = object()
+ADD_ROW = (ADD, "+ Add project…")
+REMOVE = object()
+BACK = object()
+ENTER_KEYS = (10, 13, curses.KEY_ENTER)
+TITLES = {"active": "Active team", "harness": "Choose a harness", "projects": "Select projects",
+          "model": "Choose a model", "manual": "Enter model ID", "effort": "Reasoning effort",
+          "review": "Review team", "folder": "Choose a folder",
+          "project_id": "Project ID", "stop": "Confirm stop",
+          "remove_list": "Choose a project to remove", "remove_confirm": "Remove from registry"}
+ROLES = {"orchestrator": "Orchestrator", "worker": "Workers"}
+
+
+def display_path(path):
+    return "".join(c if c.isprintable() else ascii(c)[1:-1] for c in str(path))
+
+
+class RoleSettings:
+    def __init__(self, harness="copilot"):
+        self.harness = harness
+        self.model = None
+        self.effort = None
+        self.catalog = {}
+        self.manual_selection = False
+
+    def config(self):
+        return {"harness": self.harness, "model": self.model, "effort": self.effort}
+
+    @property
+    def model_label(self):
+        return data.model_label(self.catalog, self.model) or DEFAULT
+
+
+class Wizard:
+    def __init__(self, projects, active=None, root=ROOT):
+        self.projects = list(projects)
+        self.root = root
+        self.active = active
+        self.worker_counts = Counter()
+        if active:
+            self.read_roster()
+        self.stage = "active" if active else "projects"
+        self.roles = {role: RoleSettings() for role in ROLES}
+        self.role = "orchestrator"
+        self.cursor = 0
+        self.model_input = ""
+        self.folder_origin = "projects"
+        self.folder = None
+        self.children = []
+        self.project_input = ""
+        self.removal = None
+        self.stop_role = None
+        self.message = ""
+        self.offset = 0
+
+    @property
+    def current(self):
+        return self.roles[self.role]
+
+    @property
+    def selected(self):
+        return list(self.worker_counts)
+
+    def read_roster(self):
+        self.worker_counts = Counter(slot.partition("+")[0] for slot in self.active["projects"])
+
+    def worker_label(self, slot):
+        project, _, number = slot.partition("+")
+        if self.worker_counts[project] > 1:
+            return f"{project} #{number or '1'}"
+        return project
+
+    def options(self):
+        if self.stage == "active":
+            live = self.active["panes"]
+            rows = []
+            if "orchestrator" in live:
+                rows.append(("reconnect", "Open orchestrator"))
+            else:
+                rows.append(("detail", "Orchestrator stopped"))
+            can_stop = self.active.get("can_stop", True)
+            for name in self.active["projects"]:
+                label = self.worker_label(name)
+                if name in live and not can_stop:
+                    rows.append(("detail", "Worker · " + label))
+                elif name in live:
+                    rows.append((("worker", name), "Stop worker · " + label))
+                else:
+                    rows.append(("detail", "Stopped worker · " + label))
+            if can_stop:
+                rows.append(("stop_team", "Stop entire team"))
+            else:
+                rows.append(("detail", "Legacy session · reconnect only"))
+            return [*rows, ADD_ROW, (REMOVE, "Remove project…")]
+        if self.stage == "remove_list":
+            return [*((item, item) for item in self.projects), (BACK, "Back")]
+        if self.stage == "remove_confirm":
+            _, snapshot = self.removal
+            return [("cancel", "Cancel"), ("confirm", "Remove from registry"),
+                    ("detail", "Folder · " + display_path(snapshot["working_directory"])),
+                    *(("detail", "ID · " + name) for name in snapshot["ids"])]
+        if self.stage == "stop":
+            target = self.worker_label(self.stop_role) if self.stop_role else "the entire team"
+            rows = [("cancel", "Cancel"), ("confirm", "Confirm stop · " + target)]
+            if self.stop_role is None:
+                for role in self.active["panes"]:
+                    label = "Orchestrator" if role == "orchestrator" else "Worker · " + self.worker_label(role)
+                    rows.append(("detail", label))
+                if self.active.get("foreign"):
+                    rows.append(("detail", "Other tmux windows will stay open."))
+            return rows
+        if self.stage == "folder":
+            rows = [(None, "Select this folder")]
+            if self.folder != self.folder.parent:
+                rows.append((self.folder.parent, ".."))
+            return rows + [(path, display_path(path.name) + "/") for path in self.children]
+        if self.stage == "project_id":
+            return [(None, self.project_input + "▏")]
+        if self.stage == "review":
+            rows = [("action", "Start team")]
+            for role, settings in self.roles.items():
+                rows.extend([("detail", f"{ROLES[role]}   {HOSTS[settings.harness]}"),
+                             ("detail", f"  Model    {settings.model_label}"),
+                             ("detail", f"  Effort   {settings.effort or DEFAULT}")])
+            rows.extend(("detail", f"Project   {item}  ×{count}") for item, count in self.worker_counts.items())
+            return rows
+        if self.stage == "harness":
+            return list(HOSTS.items())
+        if self.stage == "projects":
+            return [*((item, f"{item}  ×{self.worker_counts[item]}" if item in self.worker_counts else item)
+                      for item in self.projects), ADD_ROW]
+        if self.stage == "model":
+            settings = self.current
+            rows = [(None, "Automatic selection"),
+                    *((key, data.model_label(settings.catalog, key)) for key in settings.catalog)]
+            if settings.model and settings.model not in settings.catalog:
+                rows.append((settings.model, settings.model))
+            return [*rows, (MANUAL, "Enter model ID…")]
+        if self.stage == "manual":
+            return [(MANUAL, self.model_input + "▏")]
+        if self.stage == "effort":
+            levels = self.current.catalog.get(self.current.model, [])
+            return [(None, DEFAULT), *((key, key) for key in levels)]
+
+    def go(self, stage, current=None):
+        self.stage = stage
+        self.offset = 0
+        self.cursor = next((i for i, (key, _) in enumerate(self.options()) if key == current), 0)
+
+    def enter_harness(self, role):
+        self.role = role
+        self.go("harness", self.current.harness)
+
+    def last_setting(self):
+        settings = self.current
+        if settings.catalog.get(settings.model):
+            self.go("effort", settings.effort)
+        else:
+            self.go("model", settings.model)
+
+    def finish_role(self):
+        if self.role == "orchestrator":
+            self.enter_harness("worker")
+        else:
+            self.go("review")
+
+    def back(self):
+        if self.stage in ("active", "projects"):
+            return "quit"
+        if self.stage == "stop":
+            self.go("active")
+        elif self.stage == "remove_list":
+            self.go("active", REMOVE)
+        elif self.stage == "remove_confirm":
+            name, _ = self.removal
+            self.removal = None
+            self.go("remove_list" if self.active else "projects", name)
+        elif self.stage == "folder":
+            self.go(self.folder_origin, ADD)
+        elif self.stage == "project_id":
+            self.go("folder")
+        elif self.stage == "harness":
+            if self.role == "orchestrator":
+                self.go("projects", next(iter(self.worker_counts), None))
+            else:
+                self.role = "orchestrator"
+                self.last_setting()
+        elif self.stage == "model":
+            self.enter_harness(self.role)
+        elif self.stage == "manual":
+            self.go("model", MANUAL)
+        elif self.stage == "effort":
+            self.go("model", self.current.model)
+        else:
+            self.last_setting()
+
+    def refresh_models(self, loader):
+        settings = self.current
+        settings.catalog = loader(settings.harness)
+        if settings.model not in settings.catalog and not settings.manual_selection:
+            settings.model = None
+        if settings.effort not in settings.catalog.get(settings.model, []):
+            settings.effort = None
+        self.go("model", settings.model)
+
+    def choose_model(self, model, manual=False):
+        settings = self.current
+        settings.manual_selection = manual
+        if model != settings.model:
+            settings.effort = None
+        settings.model = model
+        if settings.catalog.get(model):
+            self.go("effort", settings.effort)
+        else:
+            self.finish_role()
+
+    def open_folder(self, path, focus=None):
+        try:
+            children = data.folders(path)
+        except ValueError:
+            self.message = "Could not open this folder."
+            return
+        self.folder, self.children = path, children
+        if focus not in children:
+            focus = next(iter(children), None)
+        self.go("folder", focus)
+
+    def browse_folder(self, key):
+        path = self.options()[self.cursor][0]
+        if key == curses.KEY_LEFT:
+            if self.folder != self.folder.parent:
+                self.open_folder(self.folder.parent, self.folder)
+        elif key == ord(" ") or (key in ENTER_KEYS and path is None):
+            self.project_input = data.suggested_project_id(self.folder)
+            self.go("project_id")
+        elif path is not None:
+            self.open_folder(path, self.folder if path == self.folder.parent else None)
+
+    def start_adding(self):
+        self.folder_origin = self.stage
+        self.open_folder(Path.home())
+
+    def save_project(self):
+        try:
+            name = data.add_project(self.root, self.folder, self.project_input)
+            reused = name in self.projects
+            self.reload_projects()
+        except ValueError as error:
+            self.message = str(error)
+            return
+        if name not in self.projects:
+            self.go(self.folder_origin, ADD)
+            self.message = "Registry changed. Select a project again."
+            return
+        if self.folder_origin == "active":
+            self.go("active", ADD)
+            self.message = "Project already registered." if reused else "Project available for the next team."
+        else:
+            self.worker_counts.setdefault(name, 1)
+            self.go("projects", name)
+            self.message = "Existing project selected." if reused else "Project added and selected."
+
+    def reload_projects(self):
+        self.projects = data.projects(self.root)
+        if not self.active:
+            for item in self.selected:
+                if item not in self.projects:
+                    del self.worker_counts[item]
+
+    def start_removing(self, project=None):
+        try:
+            if project is None:
+                self.reload_projects()
+                self.go("remove_list")
+            else:
+                self.removal = project, data.removal_snapshot(self.root, project)
+                self.go("remove_confirm")
+        except ValueError as error:
+            self.message = str(error)
+
+    def remove_project(self):
+        name, snapshot = self.removal
+        index = self.projects.index(name)
+        self.back()
+        try:
+            data.remove_project(self.root, name, snapshot)
+            self.reload_projects()
+        except ValueError as error:
+            self.message = str(error)
+            return
+        if self.active:
+            self.go("active", REMOVE)
+        else:
+            self.go("projects")
+            self.cursor = min(index, len(self.projects))
+        self.message = "Project removed from the registry."
+
+    def edit_text(self, key):
+        project = self.stage == "project_id"
+        text = self.project_input if project else self.model_input
+        if key == 27:
+            self.back()
+            return
+        if key in ENTER_KEYS:
+            if project:
+                self.save_project()
+            elif data.valid_model_id(text):
+                self.choose_model(text, manual=True)
+            else:
+                self.message = "Enter a valid model ID."
+            return
+        if key in (8, 127, curses.KEY_BACKSPACE):
+            text = text[:-1]
+        elif key == 21:  # Ctrl-U clears the field.
+            text = ""
+        elif 32 <= key < 127 and len(text) < 256:
+            text += chr(key)
+        if project:
+            self.project_input = text
+        else:
+            self.model_input = text
+
+    def handle(self, key, model_loader):
+        self.message = ""
+        if self.stage in ("manual", "project_id"):
+            if key == 20:  # Ctrl-T while typing an ID.
+                return "theme"
+            self.edit_text(key)
+            return
+        if self.stage in ("projects", "active") and key in (ord("a"), ord("A")):
+            self.start_adding()
+            return
+        if self.stage == "active" and key in (ord("r"), ord("R")):
+            return "refresh"
+        if self.stage in ("projects", "active") and key in (ord("d"), ord("D"), curses.KEY_DC):
+            if self.stage == "active":
+                self.start_removing()
+            elif self.cursor < len(self.projects):
+                self.start_removing(self.projects[self.cursor])
+            return
+        if key in (ord("t"), ord("T")):
+            return "theme"
+        if key in (ord("q"), ord("Q")):
+            return "quit"
+        if self.stage == "folder" and key in (*ENTER_KEYS, curses.KEY_LEFT, curses.KEY_RIGHT, ord(" ")):
+            self.browse_folder(key)
+            return
+        if key == 27 or (key == curses.KEY_LEFT and self.stage not in ("projects", "active")):
+            return self.back()
+        if self.stage == "model" and key in (ord("r"), ord("R")):
+            self.refresh_models(model_loader)
+            return
+        options = self.options()
+        if key in (curses.KEY_DOWN, ord("j"), curses.KEY_UP, ord("k")):
+            shift = 1 if key in (curses.KEY_DOWN, ord("j")) else -1
+            self.cursor = max(0, min(len(options) - 1, self.cursor + shift))
+            self.offset = 0
+            return
+        if key in (curses.KEY_HOME, curses.KEY_END) and options:
+            self.cursor = 0 if key == curses.KEY_HOME else len(options) - 1
+            self.offset = 0
+            return
+        if key == curses.KEY_RIGHT and options:
+            length = len(options[self.cursor][1])
+            self.offset = self.offset + 12 if self.offset + 12 < length else 0
+            return
+        if self.stage == "projects" and key in (ord(" "), ord("+"), ord("-")):
+            item = options[self.cursor][0]
+            if item is ADD:
+                if key == ord(" "):
+                    self.start_adding()
+            elif key == ord("+"):
+                self.worker_counts[item] += 1
+            elif key == ord("-") and self.worker_counts[item] > 1:
+                self.worker_counts[item] -= 1
+            elif item in self.worker_counts:
+                del self.worker_counts[item]
+            elif key == ord(" "):
+                self.worker_counts[item] = 1
+            return
+        if key not in ENTER_KEYS:
+            return
+        choice = options[self.cursor][0]
+        if choice is ADD:
+            self.start_adding()
+        elif choice is REMOVE:
+            self.start_removing()
+        elif self.stage == "remove_list":
+            if choice is BACK:
+                self.back()
+            else:
+                self.start_removing(choice)
+        elif self.stage == "remove_confirm":
+            if choice == "confirm":
+                self.remove_project()
+            elif choice == "cancel":
+                self.back()
+        elif self.stage == "stop":
+            if choice == "confirm":
+                return "stop"
+            if choice == "cancel":
+                self.go("active")
+        elif self.stage == "active":
+            if choice == "reconnect":
+                return "reconnect"
+            if choice != "detail":
+                self.stop_role = choice[1] if isinstance(choice, tuple) else None
+                self.go("stop")
+        elif self.stage == "projects":
+            if not self.worker_counts:
+                self.message = "Select a project with Space."
+                return
+            self.enter_harness("orchestrator")
+        elif self.stage == "harness":
+            harness = options[self.cursor][0]
+            if self.current.harness != harness:
+                self.roles[self.role] = RoleSettings(harness)
+            self.refresh_models(model_loader)
+        elif self.stage == "model":
+            model = options[self.cursor][0]
+            if model is MANUAL:
+                self.model_input = self.current.model or ""
+                self.go("manual")
+            else:
+                self.choose_model(model, manual=model is not None and model not in self.current.catalog)
+        elif self.stage == "effort":
+            self.current.effort = options[self.cursor][0]
+            self.finish_role()
+        elif options[self.cursor][0] == "detail":
+            self.message = "Press Home to return to Start team."
+        else:
+            return "launch"
+
+
+# All surfaces specify both foreground and background for deterministic dark and light themes.
+def palette(theme):
+    dark = theme == "dark"
+    names = ("canvas", "text", "muted", "accent", "surface", "subtle", "line", "selected", "tag")
+    if not curses.has_colors() or curses.COLORS < 8 or curses.COLOR_PAIRS <= len(names):
+        base = curses.A_NORMAL if dark else curses.A_REVERSE
+        result = dict.fromkeys(names, base)
+        result.update(accent=base | curses.A_BOLD, tag=base | curses.A_BOLD,
+                      selected=base ^ curses.A_REVERSE, line=base)
+        return result
+    if curses.COLORS >= 256:
+        if dark:
+            bg, fg, subtle, accent, panel, edge, selected_fg, selected_bg = 233, 255, 249, 80, 235, 242, 231, 24
+        else:
+            bg, fg, subtle, accent, panel, edge, selected_fg, selected_bg = 255, 234, 239, 24, 254, 244, 17, 153
+    elif dark:
+        bg, fg, subtle, accent, panel, edge, selected_fg, selected_bg = 0, 7, 7, 6, 0, 7, 7, 4
+    else:
+        bg, fg, subtle, accent, panel, edge, selected_fg, selected_bg = 7, 0, 0, 4, 7, 0, 7, 4
+    pairs = ((fg, bg), (fg, bg), (subtle, bg), (accent, bg), (fg, panel),
+             (subtle, panel), (edge, bg), (selected_fg, selected_bg), (accent, panel))
+    result = {}
+    for index, (name, (foreground, background)) in enumerate(zip(names, pairs), 1):
+        curses.init_pair(index, foreground, background)
+        result[name] = curses.color_pair(index)
+    return result
+
+
+class Canvas:
+    def __init__(self, window, colors):
+        self.window = window
+        self.colors = colors
+        self.height, self.width = window.getmaxyx()
+
+    def text(self, row, col, value, style="text", width=None, bold=False):
+        if not 0 <= row < self.height or not 0 <= col < self.width:
+            return
+        space = self.width - col - (row == self.height - 1)
+        if width is not None:
+            space = min(space, width)
+        if space <= 0:
+            return
+        safe = "".join(c if c.isprintable() else " " for c in value)
+        attr = self.colors[style] | (curses.A_BOLD if bold else 0)
+        try:
+            self.window.addnstr(row, col, safe, space, attr)
+        except curses.error:
+            # A resize can invalidate coordinates between getmaxyx and drawing.
+            pass
+
+    def fill(self, y, x, h, w, style):
+        for row in range(y, y + h):
+            self.text(row, x, " " * w, style)
+
+
+def summary_items(wizard):
+    yield "Projects", ", ".join(f"{project} ×{count}" for project, count in wizard.worker_counts.items()) or "None selected"
+    if wizard.stage not in ("harness", "model", "manual", "effort"):
+        return
+    settings = wizard.current
+    host = wizard.options()[wizard.cursor][0] if wizard.stage == "harness" else settings.harness
+    yield ROLES[wizard.role], HOSTS[host]
+    if host == settings.harness:
+        yield "Model", settings.model_label
+        yield "Effort", settings.effort or DEFAULT
+
+
+def summary(c, wizard, y, x, h, w):
+    c.fill(y, x, h, w, "surface")
+    c.text(y + 1, x + 2, "CURRENT SELECTION", "tag", w - 4, bold=True)
+    row = y + 3
+    for label, value in summary_items(wizard):
+        if row + 1 >= y + h:
+            break
+        c.text(row, x + 2, label, "subtle", w - 4)
+        if len(value) > w - 4:
+            value = value[:max(1, w - 5)] + "…"
+        c.text(row + 1, x + 2, value, "surface", w - 4, bold=True)
+        row += 3
+
+
+def draw(screen, wizard, theme, colors):
+    c = Canvas(screen, colors)
+    screen.bkgd(" ", colors["canvas"])
+    screen.erase()
+    h, w = c.height, c.width
+    theme_button = "[T] " + ("Light theme" if theme == "dark" else "Dark theme")
+    if h < 12 or w < 42:
+        c.text(0, 0, theme_button, "accent", bold=True)
+        c.text(2, 0, "Resize the terminal to at least 42 × 12.")
+        c.text(4, 0, "Q  Quit", "muted")
+        screen.refresh()
+        return
+    pad = 3 if w >= 68 else 1
+    inner = w - 2 * pad
+    c.fill(0, 0, 1, w, "surface")
+    c.text(0, pad, "▰  HARNESS MAILBOX", "tag", bold=True)
+    if wizard.stage in ("manual", "project_id"):
+        theme_button = theme_button.replace("[T]", "[Ctrl-T]")
+    c.text(0, w - pad - len(theme_button), theme_button, "surface", bold=True)
+    nav_y = 2
+    nav = {"projects": "Projects", **ROLES, "review": "Review"}
+    current_step = wizard.role if wizard.stage in ("harness", "model", "manual", "effort") else wizard.stage
+    title = TITLES[wizard.stage]
+    if current_step in ROLES:
+        title = f"{ROLES[current_step]} · {title}"
+    separator = "›" if w < 52 else "  ›  "
+    pos = pad
+    if wizard.stage in ("folder", "project_id"):
+        path = display_path(wizard.folder)
+        visible_path = path if len(path) <= inner else "…" + path[-(inner - 1):]
+        c.text(nav_y, pad, visible_path, "text", inner)
+    elif wizard.stage == "stop":
+        target = wizard.worker_label(wizard.stop_role) if wizard.stop_role else "Entire team"
+        c.text(nav_y, pad, target, "text", inner, bold=True)
+    elif wizard.stage == "remove_confirm":
+        c.text(nav_y, pad, wizard.removal[0], "text", inner, bold=True)
+    elif wizard.stage not in ("active", "remove_list"):
+        for index, (step, label) in enumerate(nav.items()):
+            if index:
+                c.text(nav_y, pos, separator, "line")
+                pos += len(separator)
+            c.text(nav_y, pos, label, "accent" if step == current_step else "muted",
+                   bold=step == current_step)
+            pos += len(label)
+    c.text(4, pad, title, "text", bold=True)
+    c.text(5, pad, "━" * min(5, inner) + "─" * max(0, inner - 5), "line")
+    y, bottom = 7, h - 3
+    wide = w >= 88 and h >= 19 and wizard.stage in ("harness", "model", "manual", "effort")
+    sidebar = min(42, inner // 3) if wide else 0
+    list_width = inner - sidebar - 3 if wide else inner
+    if wide:
+        summary(c, wizard, y - 1, w - pad - sidebar, bottom - y + 2, sidebar)
+    if wizard.stage == "harness":
+        instruction = "Applies to all selected workers." if wizard.role == "worker" else "Coordinates the selected projects."
+    elif wizard.stage == "projects":
+        instruction = "Space Select · +/- Workers · A Add · D Remove"
+        if inner < len(instruction):
+            instruction = "Space Select  +/- Count  A Add  D Remove"
+    elif wizard.stage == "model":
+        count = len(wizard.current.catalog)
+        if count:
+            noun = "model" if count == 1 else "models"
+            instruction = f"{count} {noun} · R Refresh"
+        else:
+            instruction = "Enter a model ID or press R to refresh."
+    elif wizard.stage == "manual":
+        instruction = "Enter the model ID from your harness."
+    elif wizard.stage == "effort":
+        instruction = wizard.current.model_label
+    elif wizard.stage == "active":
+        instruction = "A Add · D Remove · R Refresh"
+    elif wizard.stage == "remove_list":
+        instruction = "Enter Review · Esc Back" if wizard.projects else "No registered projects."
+    elif wizard.stage == "remove_confirm":
+        instruction = "Project files will stay on disk."
+    elif wizard.stage == "stop":
+        target = wizard.worker_label(wizard.stop_role) if wizard.stop_role else "the entire team"
+        instruction = "This will stop work for " + target + "."
+    elif wizard.stage == "folder":
+        instruction = "Space Select this folder · Esc Cancel"
+    elif wizard.stage == "project_id":
+        instruction = "Enter Save · Ctrl-U Clear"
+    else:
+        count = sum(wizard.worker_counts.values())
+        instruction = f"1 orchestrator · {count} " + ("worker" if count == 1 else "workers")
+    if wizard.message:
+        instruction = wizard.message
+    c.text(y - 1, pad, instruction, "accent" if wizard.message else "muted", list_width)
+    options = wizard.options()
+    stride = 2 if wizard.stage != "review" and h >= 22 and (bottom - y) >= min(4, len(options)) * 2 else 1
+    visible = max(1, (bottom - y) // stride)
+    start = min(max(0, wizard.cursor - visible + 1), max(0, len(options) - visible))
+    for i in range(start, min(start + visible, len(options))):
+        item, title = options[i]
+        row = y + (i - start) * stride
+        focus = i == wizard.cursor
+        style = "selected" if focus else "surface"
+        c.fill(row, pad, 1, list_width, style)
+        prefix = ("▸ " if focus else "  ")
+        if wizard.stage == "projects" and item is not ADD:
+            prefix += ("[●] " if item in wizard.worker_counts else "[ ] ")
+        available = list_width - 2 - len(prefix)
+        label = title[wizard.offset:] if focus and len(title) > available else title
+        if wizard.stage in ("manual", "project_id"):
+            label = title[-max(1, available):]
+        if len(label) > available:
+            suffix = "…" if wizard.stage == "folder" else " →"
+            label = label[:max(0, available - len(suffix))] + suffix
+        c.text(row, pad + 1, prefix + label, style, list_width - 2, bold=focus)
+    if len(options) > visible:
+        c.text(bottom, pad, f"{start + 1}–{min(start + visible, len(options))} of {len(options)}", "muted")
+    c.text(h - 2, pad, "─" * inner, "line")
+    controls = "↑↓ Navigate   Enter Next   Esc Back   Q Quit"
+    if w < 52:
+        controls = "↑↓ Move  Enter OK  Esc Back  Q Quit"
+    if wizard.stage == "folder":
+        controls = "↑↓ Move  →/Enter Open  ← Up"
+    elif wizard.stage in ("manual", "project_id"):
+        controls = "Enter Confirm  Esc Cancel  ⌫ Delete"
+    c.text(h - 1, pad, controls, "muted", inner)
+    screen.refresh()
+
+
+def run_ui(screen, root):
+    theme = data.read_theme()
+    wizard = Wizard([], data.managed_team(root), root)
+
+    def load_registry():
+        try:
+            wizard.reload_projects()
+        except ValueError:
+            wizard.projects = []
+            if not wizard.active:
+                wizard.worker_counts.clear()
+            return "Project registry unavailable."
+        return ""
+
+    registry_message = load_registry()
+    screen.keypad(True)
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    colors = palette(theme)
+    wizard.message = "Checking dashboard container…"
+    draw(screen, wizard, theme, colors)
+    dashboard_ready = data.ensure_dashboard(root)
+    dashboard_message = "" if dashboard_ready else "Dashboard unavailable. Check Docker."
+    wizard.message = " ".join(filter(None, (registry_message, dashboard_message)))
+
+    def load_catalog(harness):
+        wizard.message = "Loading models from " + HOSTS[harness] + "…"
+        draw(screen, wizard, theme, colors)
+        try:
+            return data.models(harness)
+        finally:
+            wizard.message = ""
+
+    while True:
+        draw(screen, wizard, theme, colors)
+        key = screen.getch()
+        h, w = screen.getmaxyx()
+        if h < 12 or w < 42:
+            if key in (ord("q"), ord("Q"), 27):
+                return None
+            if key not in (ord("t"), ord("T")):
+                continue
+            action = "theme"
+        else:
+            action = wizard.handle(key, load_catalog)
+        if action == "theme":
+            theme = "light" if theme == "dark" else "dark"
+            colors = palette(theme)
+            if not data.write_theme(theme):
+                wizard.message = "Theme applied for this session only."
+        elif action == "reconnect":
+            return action, wizard.active, None
+        elif action in ("refresh", "stop"):
+            message = ""
+            if action == "stop":
+                try:
+                    data.stop_managed(root, wizard.active, role=wizard.stop_role)
+                    message = "Worker stopped." if wizard.stop_role else "Team stopped."
+                except ValueError:
+                    message = "Stop failed. Refresh the team and retry."
+            wizard.active = data.managed_team(root)
+            if wizard.active:
+                wizard.read_roster()
+            wizard.go("active" if wizard.active else "projects")
+            wizard.message = load_registry() or message
+        elif action == "launch":
+            return (action, list(wizard.worker_counts.elements()), wizard.roles["orchestrator"].config(),
+                    wizard.roles["worker"].config())
+        elif action == "quit":
+            return None
+
+
+def enter_login_shell():
+    # Use the WSL user's interactive environment, including CLI paths set in shell rc files.
+    shell = pwd.getpwuid(os.getuid()).pw_shell
+    os.execv(shell, [shell, "-ilc", "exec ~/.local/bin/team"])
+
+
+def main():
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("Run team in an interactive terminal.", file=sys.stderr)
+        return 1
+    try:
+        if sys.argv[1:] == ["--from-windows"]:
+            try:
+                enter_login_shell()
+            except (KeyError, OSError, ValueError):
+                print("Could not open the WSL login shell.", file=sys.stderr)
+                return 1
+            return 0
+        result = curses.wrapper(run_ui, ROOT)
+        if result:
+            if result[0] == "reconnect":
+                data.reconnect(ROOT, result[1])
+            else:
+                _, selection, orchestrator, worker = result
+                data.launch(ROOT, selection, orchestrator, worker)
+    except (curses.error, OSError, ValueError):
+        print("Could not open team. Check the terminal and project registry.", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

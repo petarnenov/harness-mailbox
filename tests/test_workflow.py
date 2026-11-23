@@ -1,4 +1,5 @@
 """Behavioral tests for Make's shell workflow, using an isolated Docker CLI double."""
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -6,7 +7,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from unittest.mock import patch
 
 
 FAKE_DOCKER = r'''
@@ -18,6 +21,14 @@ if args == ['--version']:
     sys.exit(int(os.environ.get('FAIL_CLI', '0')))
 if args == ['info']:
     sys.exit(int(os.environ.get('FAIL_DAEMON', '0')))
+if args[0] == 'ps':
+    if os.environ.get('FAIL_STATUS'):
+        sys.exit(1)
+    state = pathlib.Path(os.environ['DASHBOARD_STATE'])
+    if state.exists():
+        print(state.read_text() + ' ' + os.environ.get('SERVICE_OWNER', os.getcwd()))
+    if os.environ.get('ONEOFF') and 'label=com.docker.compose.oneoff=False' not in args:
+        print('running ' + os.getcwd())
 if args[:2] == ['compose', 'version']:
     sys.exit(int(os.environ.get('FAIL_COMPOSE', '0')))
 if args[0] == 'compose':
@@ -38,6 +49,14 @@ if args[0] == 'compose':
                 if value.startswith("'") and value.endswith("'"):
                     value = value[1:-1].replace("\\'", "'")
         print('MAILBOX_ROOT=' + (value or ''))
+    elif command[0] == 'up' and 'DASHBOARD_STATE' in os.environ:
+        if os.environ.get('FAIL_START'):
+            print('synthetic-private-detail', file=sys.stderr)
+            sys.exit(1)
+        if os.environ.get('SLOW_START'):
+            import time
+            time.sleep(0.15)
+        pathlib.Path(os.environ['DASHBOARD_STATE']).write_text('running')
 '''
 
 
@@ -71,6 +90,88 @@ class WorkflowTests(unittest.TestCase):
 
     def calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def test_team_dashboard_is_scoped_and_only_starts_when_absent_or_stopped(self):
+        state = self.app / 'state'
+        for status in ('missing', 'stopped', 'running'):
+            with self.subTest(status=status):
+                self.log.unlink(missing_ok=True)
+                if status != 'missing':
+                    state.write_text(status)
+                result = self.run_workflow('ensure-dashboard', PROJECT_NAME='test-dashboard',
+                                           DASHBOARD_STATE=str(state), ONEOFF='1')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(state.read_text(), 'running')
+                calls = [call['args'] for call in self.calls() if call['args'][0] == 'compose']
+                prefix = ['compose', '--project-name', 'test-dashboard', '--project-directory', str(self.app),
+                          '--file', str(self.app / 'compose.yaml')]
+                self.assertTrue(all(call[:7] == prefix for call in calls), calls)
+                statuses = [c['args'] for c in self.calls() if c['args'][0] == 'ps']
+                self.assertTrue(statuses)
+                for status_call in statuses:
+                    self.assertIn('label=com.docker.compose.project=test-dashboard', status_call)
+                    self.assertIn('label=com.docker.compose.service=dashboard', status_call)
+                    self.assertIn('label=com.docker.compose.oneoff=False', status_call)
+                starts = [call[7:] for call in calls if call[7] == 'up']
+                if status == 'running':
+                    self.assertFalse(starts)
+                else:
+                    start, = starts
+                    self.assertEqual((start[0], start[-1]), ('up', 'dashboard'))
+                    self.assertTrue({'-d', '--no-deps', '--no-recreate'} <= set(start))
+                    self.assertNotIn('--build', start)
+
+    def test_dashboard_with_same_compose_name_from_different_checkout_is_left_alone(self):
+        state = self.app / 'state'
+        foreign = self.root / 'another checkout'
+        foreign.mkdir()
+        for status in ('running', 'exited'):
+            with self.subTest(status=status):
+                self.log.unlink(missing_ok=True)
+                state.write_text(status)
+                result = self.run_workflow('ensure-dashboard', DASHBOARD_STATE=str(state),
+                                           SERVICE_OWNER=str(foreign))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(state.read_text(), status)
+                self.assertFalse(any('up' in call['args'] for call in self.calls()))
+
+    def test_unknown_dashboard_status_cannot_start_a_container(self):
+        result = self.run_workflow('ensure-dashboard', DASHBOARD_STATE=str(self.app / 'state'), FAIL_STATUS='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(any(call['args'][0] == 'ps' for call in self.calls()))
+        self.assertFalse(any('up' in call['args'] for call in self.calls()))
+
+    def test_team_dashboard_respects_existing_configuration_and_reports_failed_start(self):
+        configured = self.root / 'configured mailbox'
+        configured.mkdir()
+        (configured / 'projects.json').write_text('[]')
+        content = f"MAILBOX_ROOT='{configured}'\n"
+        env_file = self.app / '.env'
+        env_file.write_text(content)
+        state = self.app / 'state'
+        result = self.run_workflow('ensure-dashboard', DASHBOARD_STATE=str(state), FAIL_START='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(state.exists())
+        self.assertTrue(any('up' in c['args'] for c in self.calls()))
+        self.assertTrue(all(c['root'] is None for c in self.calls()))
+        self.assertEqual(env_file.read_text(), content)
+
+    def test_concurrent_menu_openings_share_one_dashboard_start(self):
+        plugin = Path(__file__).resolve().parents[1] / 'workspace/copilot-mailbox'
+        with patch.object(sys, 'path', [str(plugin), *sys.path]):
+            import team_ui_data
+        begin = threading.Barrier(2)
+
+        def open_dashboard():
+            begin.wait(timeout=5)
+            return team_ui_data.ensure_dashboard(self.root)
+
+        with (patch.dict(os.environ, dict(self.env, DASHBOARD_STATE=str(self.app / 'state'), SLOW_START='1'),
+                         clear=True), ThreadPoolExecutor(max_workers=2) as executor):
+            futures = [executor.submit(open_dashboard) for _ in range(2)]
+            self.assertTrue(all(future.result(timeout=10) for future in futures))
+        self.assertEqual((self.app / 'state').read_text(), 'running')
+        self.assertEqual(sum('up' in call['args'] for call in self.calls()), 1)
 
     def test_doctor_is_read_only_and_reports_dependencies(self):
         (self.app / '.env').write_text("MAILBOX_ROOT='" + str(self.root) + "'\n")

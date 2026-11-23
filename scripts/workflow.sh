@@ -14,6 +14,18 @@ SCRIPT_TESTS=workspace/.agents/skills/mailbox-orchestrator/scripts
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 compose() { "$DOCKER" compose --project-name "$PROJECT_NAME" --project-directory "$APP_DIR" --file "$APP_DIR/compose.yaml" "$@"; }
 
+dashboard_state() {
+    # A second checkout can share the Compose name, and 'compose run' creates
+    # one-off containers for this service without publishing the dashboard port.
+    details=$("$DOCKER" ps --all --filter "label=com.docker.compose.project=$PROJECT_NAME" \
+        --filter label=com.docker.compose.service=dashboard --filter label=com.docker.compose.oneoff=False \
+        --format '{{.State}} {{.Label "com.docker.compose.project.working_dir"}}') || return 1
+    if [ -n "$details" ]; then
+        [ "${details#* }" -ef "$APP_DIR" ] || fail 'Dashboard container belongs to another Compose directory.'
+        printf '%s\n' "${details%% *}"
+    fi
+}
+
 doctor_deps() {
     make --version >/dev/null 2>&1 || fail 'Make is missing or cannot execute. Run sh scripts/install-system.sh and follow its PATH instructions.'
     printf 'OK: Make\n'
@@ -109,6 +121,18 @@ case "${1:-help}" in
         ;;
     build) doctor_deps; doctor_config; compose build ;;
     up) doctor_deps; doctor_config; compose up -d --build --wait ;;
+    ensure-dashboard)
+        if [ ! -e .env ] && [ -z "${MAILBOX_ROOT:-}" ]; then
+            MAILBOX_ROOT=$(detect_mailbox_root)
+            export MAILBOX_ROOT
+        fi
+        state=$(dashboard_state)
+        [ "$state" != running ] || exit 0
+        doctor_config
+        compose up -d --no-recreate --no-deps --wait dashboard
+        state=$(dashboard_state)
+        [ "$state" = running ] || fail 'Dashboard service did not start.'
+        ;;
     restart) doctor_deps; doctor_config; compose up -d --build --force-recreate --wait ;;
     down) doctor_deps; compose down ;;
     status) doctor_deps; compose ps ;;
