@@ -13,6 +13,7 @@ One row per completed run. Numbers come from the run log, never from estimates.
 
 | date | run log | tier | loop ver | delegations | attempts ≥2 | rejected reports | blocking review | gate amends | tokens | wall-clock | lessons (filed / applied / validated / reverted) | fix loops |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-11-23 | multi-project.md | MEDIUM | 2026-11-23.1 | 5 | 0 | 0 | 0 | 0 | unavailable | unavailable | 0 / 0 / 0 / 0 | 0 |
 
 ## Lessons
 

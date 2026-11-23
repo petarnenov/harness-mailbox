@@ -63,6 +63,7 @@ class Wizard:
         self.model_input = ""
         self.folder_origin = "projects"
         self.folder = None
+        self.project_folder = None
         self.children = []
         self.project_input = ""
         self.removal = None
@@ -195,7 +196,7 @@ class Wizard:
         elif self.stage == "folder":
             self.go(self.folder_origin, ADD)
         elif self.stage == "project_id":
-            self.go("folder")
+            self.go("folder", self.project_folder if self.project_folder != self.folder else None)
         elif self.stage == "harness":
             if self.role == "orchestrator":
                 self.go("projects", next(iter(self.worker_counts), None))
@@ -231,14 +232,14 @@ class Wizard:
         else:
             self.finish_role()
 
-    def open_folder(self, path, focus=None):
+    def open_folder(self, path, focus=None, *, focus_first=False):
         try:
             children = data.folders(path)
         except ValueError:
             self.message = "Could not open this folder."
             return
         self.folder, self.children = path, children
-        if focus not in children:
+        if focus_first:
             focus = next(iter(children), None)
         self.go("folder", focus)
 
@@ -248,18 +249,19 @@ class Wizard:
             if self.folder != self.folder.parent:
                 self.open_folder(self.folder.parent, self.folder)
         elif key == ord(" ") or (key in ENTER_KEYS and path is None):
-            self.project_input = data.suggested_project_id(self.folder)
+            self.project_folder = path or self.folder
+            self.project_input = data.suggested_project_id(self.project_folder)
             self.go("project_id")
         elif path is not None:
             self.open_folder(path, self.folder if path == self.folder.parent else None)
 
     def start_adding(self):
         self.folder_origin = self.stage
-        self.open_folder(Path.home())
+        self.open_folder(Path.home(), focus_first=True)
 
     def save_project(self):
         try:
-            name = data.add_project(self.root, self.folder, self.project_input)
+            name = data.add_project(self.root, self.project_folder, self.project_input)
             reused = name in self.projects
             self.reload_projects()
         except ValueError as error:
@@ -558,7 +560,7 @@ def draw(screen, wizard, theme, colors):
     separator = "›" if w < 52 else "  ›  "
     pos = pad
     if wizard.stage in ("folder", "project_id"):
-        path = display_path(wizard.folder)
+        path = display_path(wizard.folder if wizard.stage == "folder" else wizard.project_folder)
         visible_path = path if len(path) <= inner else "…" + path[-(inner - 1):]
         c.text(nav_y, pad, visible_path, "text", inner)
     elif wizard.stage == "stop":
@@ -609,7 +611,7 @@ def draw(screen, wizard, theme, colors):
         target = wizard.worker_label(wizard.stop_role) if wizard.stop_role else "the entire team"
         instruction = "This will stop work for " + target + "."
     elif wizard.stage == "folder":
-        instruction = "Space Select this folder · Esc Cancel"
+        instruction = "Space Select highlighted folder · Esc Cancel"
     elif wizard.stage == "project_id":
         instruction = "Enter Save · Ctrl-U Clear"
     else:

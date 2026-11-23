@@ -620,7 +620,7 @@ for message in [
         menu.handle(curses.KEY_DC, lambda _: {})
         self.assertEqual(menu.stage, 'projects')
         self.assertEqual(self.registry.read_bytes(), before)
-        menu.folder = self.base / 'alpha'
+        menu.project_folder = self.base / 'alpha'
         menu.folder_origin = 'projects'
         for project_id in ('first-id', 'second-id'):
             menu.project_input = project_id
@@ -665,7 +665,34 @@ for message in [
         self.assertIn('fresh-id', self.data.projects(self.root))
         self.assertFalse((self.root / 'sessions').exists())
 
-    def test_folder_arrows_and_enter_open_nested_paths_and_space_selects_current_folder(self):
+    def test_confirming_a_highlighted_child_shows_its_path_and_escape_restores_focus(self):
+        before = self.registry.read_bytes()
+        keys = [ord('a'), curses.KEY_DOWN, ord(' '), 27, ord(' '), 27, 27, ord('q')]
+        screen, _, _ = self.screen_session(keys)
+        confirmations = [frame for frame in screen.frames if 'Enter Save' in frame]
+        self.assertEqual(len(confirmations), 2)
+        for frame in confirmations:
+            self.assertIn(str(self.base / 'beta'), frame)
+        self.assertEqual(self.registry.read_bytes(), before)
+
+    def test_space_adds_two_highlighted_siblings_to_registry_and_team(self):
+        self.registry.write_text('{"projects":[]}')
+        menu = self.ui['Wizard']([], root=self.root)
+        for name in ('alpha', 'beta'):
+            menu.handle(ord('a'), lambda _: {})
+            menu.handle(curses.KEY_HOME, lambda _: {})
+            while menu.options()[menu.cursor][0] != self.base / name:
+                self.assertLess(menu.cursor, len(menu.options()) - 1)
+                menu.handle(curses.KEY_DOWN, lambda _: {})
+            menu.handle(ord(' '), lambda _: {})
+            menu.handle(10, lambda _: {})
+        self.assertEqual(menu.selected, ['alpha', 'beta'])
+        self.assertEqual(self.data.projects(self.root), ['alpha', 'beta'])
+        rows = json.loads(self.registry.read_text())['projects']
+        self.assertEqual([(row['id'], row['working_directory']) for row in rows],
+                         [(name, str(self.base / name)) for name in ('alpha', 'beta')])
+
+    def test_folder_arrows_and_enter_open_nested_paths_and_current_folder_row_selects_it(self):
         home = self.base / 'browse'
         group = home / 'Company'
         project = group / '02 Project'
@@ -676,14 +703,14 @@ for message in [
         with patch.object(Path, 'home', return_value=home):
             menu.handle(ord('a'), lambda _: {})
         self.assertEqual(menu.options()[menu.cursor][0], group)
-        for key in (curses.KEY_RIGHT, curses.KEY_DOWN, 10):
+        for key in (curses.KEY_RIGHT, curses.KEY_END, 10):
             menu.handle(key, lambda _: {})
         self.assertEqual((menu.stage, menu.folder), ('folder', project))
         menu.handle(curses.KEY_LEFT, lambda _: {})
         self.assertEqual((menu.stage, menu.folder), ('folder', group))
         self.assertEqual(menu.options()[menu.cursor][0], project)
         menu.handle(curses.KEY_RIGHT, lambda _: {})
-        self.assertEqual(menu.options()[menu.cursor][0], project / 'src')
+        self.assertEqual(menu.options()[menu.cursor][1], 'Select this folder')
         menu.handle(ord(' '), lambda _: {})
         self.assertEqual(menu.stage, 'project_id')
         self.assertEqual(menu.project_input, '02-Project')
