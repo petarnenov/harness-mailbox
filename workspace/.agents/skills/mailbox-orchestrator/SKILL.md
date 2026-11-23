@@ -5,7 +5,7 @@ description: Coordinate registered agent sessions (Codex, Claude Code or GitHub 
 
 # Mailbox orchestrator
 
-You coordinate project sessions; you are not an additional implementation worker. Work from `~/harness-mailbox`. Keep durable tasks, dependencies and evidence here, and delegate authorized implementation to the registered project sessions. Do not change project source code yourself unless the user explicitly changes your role.
+You coordinate project sessions; you are not an additional implementation worker. Use the mailbox root supplied by the caller (`HARNESS_MAILBOX_ROOT` in an autonomous Copilot session, otherwise normally `~/harness-mailbox`). Keep durable tasks, dependencies and evidence here, and delegate authorized implementation to the registered project sessions. Do not change project source code yourself unless the user explicitly changes your role.
 
 ## Mandatory scope boundary
 
@@ -19,7 +19,7 @@ Never expand a task's scope. Never implement improvements the user has not reque
 
 ## Activate or resume
 
-1. Read `~/harness-mailbox/AGENTS.md`, `README.md` and `projects.json`. Read current project records, session registrations, tasks and your inbox. Preserve existing state; do not initialize over ongoing work.
+1. Read the selected mailbox root’s `AGENTS.md`, `README.md` and `projects.json`. Read current project records, session registrations, tasks and your inbox. Preserve existing state; do not initialize over ongoing work.
 2. Register yourself separately as `sessions/orchestrator.json`, with `role: orchestrator`, `project: null`, actual `session_id` if known (otherwise null), `host` and `transport` as named in host-adapters.md, `working_directory`, `status` and UTC `last_seen_at`. Never overwrite another orchestrator's registration: use a unique suffix and resolve ownership before dispatching overlapping work. Create `inbox/orchestrator`, `outbox/orchestrator` and `archive/orchestrator` if absent. The orchestrator is a routing identity, not an entry in the project registry. Claude Code expands the next value to this session's ID; on any other host it stays an unexpanded placeholder, which is not an ID: `${CLAUDE_SESSION_ID}`.
 3. Read [host-adapters.md](references/host-adapters.md) and discover which session-messaging tools this host actually exposes for listing sessions, sending a message, reading a session and waiting for replies. Do not assume another host has these tools, and do not assume a worker runs on the same host as you: a session on a different host is reachable through mailbox files only. Match registrations to verified session IDs and project paths; titles alone are insufficient. Never register another worker on its behalf or infer liveness from saved timestamps or `notLoaded`.
 4. Reconcile registrations with `scripts/reconcile_sessions.py`:
@@ -84,7 +84,7 @@ Files are the durable record and the only transport every host shares. Session-m
 2. If direct messaging is available and the destination is verified, send a short notification pointing to that exact message file and ID. Ask the worker to deduplicate by ID, read the task, publish its response through the mailbox and return a short thread reply. The notification and file represent one request, not two jobs.
 3. Use the host's read and, when supported, wait tools to collect replies; on a host without them, collect replies from `inbox/orchestrator` and direct messages. Keep waits at most 60 seconds and provide useful progress updates during sustained work. Observe the same task after a timeout; do not restart or resend it solely because the observation timed out.
 4. Record returned evidence and status in the mailbox, keeping the original reply ID and task references. Archive processed messages; do not acknowledge replies automatically or create reply loops.
-5. If sending fails ambiguously, inspect the destination thread and mailbox for receipt before retrying the same message ID. If tools are unavailable or the session cannot be reached, leave the request queued and report `delivery_unconfirmed`. Provide the user with the exact message-file path to give the worker. Do not claim a file write woke a session. No watcher or bridge is installed by this skill.
+5. If sending fails ambiguously, inspect the destination thread and mailbox for receipt before retrying the same message ID. If tools are unavailable or the session cannot be reached, leave the request queued and report `delivery_unconfirmed`. A worker started through the Copilot mailbox launcher receives a queued local notification automatically. When waiting for this worker, end the current turn and let its reply notify the coordinator. For a receiver without a listener or a direct session tool, give the user the exact message-file path to relay. Do not claim a file write woke a session. No watcher or bridge is installed by this skill.
 
 A harmless PING/PONG with the worker's project path can establish reachability when a registered session's mapping is uncertain. Do not message unrelated threads while searching for workers.
 

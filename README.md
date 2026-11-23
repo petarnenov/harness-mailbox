@@ -112,7 +112,29 @@ The sticky header contains five page tabs: **Overview**, **Dependencies**, **Tas
 
 The dashboard is independent of the agent host. Codex, Claude Code, GitHub Copilot or another local tool can produce the same JSON snapshots using the contract below; the application only reads files. The workspace skills define discovery and message delivery for each host. The displayed agent effort model is a planning convention, not a connection to an agent or billing API.
 
-The workspace template includes two Copilot CLI profiles. Install `workspace/.github/agents/mailbox-*.agent.md` under the mailbox's `.github/agents/` alongside the standard workspace skills. Follow the [two-terminal Copilot walkthrough](workspace/.agents/skills/mailbox-orchestrator/references/host-adapters.md#starting-copilot-cli) to start both roles, register the exact worker session and verify a read-only task through its receipts and reply.
+Copy `workspace/team`, `workspace/install-team.sh`, and the complete `workspace/copilot-mailbox/` directory into the mailbox root alongside `projects.json`, preserving executable permissions. Install the per-user command from that directory:
+
+```sh
+sh install-team.sh
+```
+
+Run the installer on macOS, Linux, or in the WSL 2 distribution containing the mailbox. Use Python 3 with curses, and install tmux and sign in to each selected harness CLI in the same environment. Registry paths must resolve there. On Windows, the installer also adds a per-user `team.cmd` to the Windows PATH for PowerShell and Command Prompt. It targets the installing WSL distribution even when another distribution is the default. Reopen the terminal after installation. If Windows still has the old PATH, sign out and back in.
+
+Opening `team` starts the local dashboard at **http://localhost:17171** if its Docker Compose service is stopped or missing. Opening the menu again leaves a running container in place. If Docker is unavailable, the menu shows a warning and you can still manage the team.
+
+Type `team` from any directory. Mark the local projects with Space. Press `A` to open the directory browser. Use Up/Down to highlight a folder, Right or Enter to open it, and Left to return to its parent. Press Space to select the directory shown at the top, then confirm its editable ID. Esc leaves the browser. The new record uses the chosen working directory and the containing Git repository root when available. An existing working directory reuses its ID. The installer and interactive menu use the user's local mailbox.
+
+Adding the same working directory again selects its existing project ID. If a project uses a subdirectory of a Git checkout, selecting the checkout root reuses the project when the match is unambiguous. An old duplicate root registration appears under the original project in the menu.
+
+Each selected project starts with one worker. Highlight a project and use `+` or `-` to adjust its worker count before launch. The team starts one orchestrator for all projects and opens a separate terminal window for each worker. Workers on the same project share its inbox and register individual endpoints. The orchestrator addresses each assignment to one endpoint. From the active team menu you can stop workers individually.
+
+Highlight a project and press `D` or Delete to remove it from the local registry. The confirmation shows the project directory and the IDs that will be removed. Cancel is selected initially. Confirming keeps project files, task history and other projects on disk. From the active team menu, choose **Remove project** to browse registered projects.
+
+Select the orchestrator's harness, model and reasoning effort, then select the workers' harness, model and effort independently. Each role supports Copilot, Claude Code and Codex. The worker settings apply to every worker window. The model picker reads the selected CLI's catalog, supports refresh with `R` and accepts manual model IDs. For Claude Code, each alias is displayed with the model name and version advertised by the CLI; launching passes the selected ID to Claude Code. A separate effort picker appears for models that advertise reasoning levels. Review both roles before starting. Use `T` to switch between dark and light or `Ctrl-T` while editing an ID.
+
+Run `team` in another terminal to manage the current team. You can also detach from tmux with its default `Ctrl-B`, then `D`, and run the same command. Choose the orchestrator to reconnect, a project worker to stop it, or the whole team to stop all managed participants. Confirm the affected participants to interrupt their CLI sessions. Other tmux programs remain open. Older teams without the original pane ownership information allow reconnection only. Codex runs in its own foreground CLI with its configured permissions. First use can require project trust, sign-in or mailbox access approval. Adding a project while a team is running registers it for the next team. `Q` exits the management menu and leaves running workers alone.
+
+The workspace template includes two Copilot CLI profiles. Install `workspace/.github/agents/mailbox-*.agent.md` under the mailbox's `.github/agents/` alongside the standard workspace skills. For autonomous notification, also copy the complete `workspace/copilot-mailbox/` directory into the mailbox root and preserve the executable bits on `team` and `start`. The interactive `team` command loads these profiles when you select Copilot. The [Copilot walkthrough](workspace/.agents/skills/mailbox-orchestrator/references/host-adapters.md#starting-copilot-cli) also covers separate terminals and delivery verification.
 
 ## Delivery package
 

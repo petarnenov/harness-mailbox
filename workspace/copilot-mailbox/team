@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""Open the mailbox coordinator and its project workers in one terminal."""
+import argparse
+import fcntl
+import hashlib
+import os
+from pathlib import Path
+import re
+import runpy
+import shutil
+import subprocess
+import sys
+import time
+import uuid
+from typing import NamedTuple, Optional
+
+CONTROL = Path(__file__).resolve().with_name("team_control.py")
+
+class StartupError(Exception):
+    """A fixed diagnostic that may be shown to the operator."""
+
+
+def tmux(*args, check=True):
+    return subprocess.run(["tmux", *args], check=check, capture_output=True, text=True)
+
+
+def session_name(root):
+    fingerprint = hashlib.sha256(os.fsencode(root)).hexdigest()[:16]
+    return "copilot-mailbox-" + fingerprint
+
+
+def open_lock(path):
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+    return os.fdopen(os.open(path, flags, 0o600), "r+b")
+
+
+def coordinator_running(root):
+    with open_lock(root / ".copilot-mailbox-orchestrator.lock") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+    return False
+
+
+def worker_slot(project, number):
+    return project if str(number) == "1" else f"{project}+{number}"
+
+
+def worker_slots(projects):
+    """Index panes per project while preserving the requested launch order."""
+    counts = {}
+    slots = {}
+    for project in projects:
+        number = counts.get(project, 0) + 1
+        counts[project] = number
+        slots[worker_slot(project, number)] = (project, number)
+    return slots
+
+
+def launch_pane(launcher):
+    # Run the same CLI entry point in this pane. Its callback is reached after
+    # project validation and, for the coordinator, after winning the lock.
+    sys.argv = [str(launcher), *sys.argv[2:]]
+    pane = os.environ.get("TMUX_PANE", "")
+    if len(sys.argv) < 2 or (sys.argv[1] == "worker" and len(sys.argv) < 3):
+        raise StartupError("Specify a participant role. Workers also need a project ID.")
+    if not re.fullmatch(r"%[0-9]+", pane):
+        raise StartupError("Could not find the participant's tmux pane.")
+
+    def ready():
+        # Pin the PID from the process that validated the role. respawn-pane preserves tmux
+        # user options while replacing the process, so a role marker alone is insufficient.
+        tmux("set-option", "-p", "-t", pane, "@mailbox_initial_pid", str(os.getpid()))
+        route = os.environ["HARNESS_MAILBOX_ROUTE"]
+        slot = route
+        if route != "orchestrator":
+            slot = worker_slot(route, os.environ["HARNESS_MAILBOX_WORKER_NUMBER"])
+        tmux("set-option", "-p", "-t", pane, "@copilot_route", slot)
+
+    runpy.run_path(str(launcher))["main"](on_ready=ready)
+
+
+def pane_roles(name):
+    # A respawned pane keeps its tmux options. Count it only while its original
+    # foreground process is present; legacy unpinned teams can still reconnect.
+    same_token = "#{==:#{@mailbox_pane_token},#{@mailbox_team_token}}"
+    original_pid = "#{||:#{==:#{@mailbox_initial_pid},},#{==:#{@mailbox_initial_pid},#{pane_pid}}}"
+    result = tmux("list-panes", "-s", "-t", "=" + name + ":",
+                  "-f", "#{&&:" + same_token + "," + original_pid + "}",
+                  "-F", "#{pane_id} #{pane_dead} #{@copilot_route}", check=False)
+    live = {}
+    for line in result.stdout.splitlines():
+        pane, dead, route = line.split(" ", 2)
+        if dead == "0":
+            live[pane] = route
+    return live
+
+
+def wait_for_members(name, expected):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        live = pane_roles(name)
+        if not expected.keys() <= live.keys():
+            break
+        if all(live[pane] == route for pane, route in expected.items()):
+            return
+        time.sleep(0.05)
+    raise StartupError("A participant could not start in its tmux pane.")
+
+
+class RoleSettings(NamedTuple):
+    harness: str
+    model: Optional[str]
+    effort: Optional[str]
+
+    def participant_args(self):
+        args = ["--harness", self.harness]
+        if self.model:
+            args.extend(["--model", self.model])
+        if self.effort:
+            args.extend(["--reasoning-effort", self.effort])
+        return args
+
+
+def settings_for(args, role):
+    harness = getattr(args, role + "_harness")
+    model = getattr(args, role + "_model") or args.model
+    if harness == "copilot" and model is None:
+        model = "auto"
+    elif harness != "copilot" and model == "auto":
+        model = None
+    return RoleSettings(harness, model, getattr(args, role + "_effort") or args.reasoning_effort)
+
+
+def create_team(root, launcher, name, projects, slots, orchestrator, workers):
+    for harness in dict.fromkeys((orchestrator.harness, workers.harness)):
+        if not shutil.which(harness):
+            raise StartupError(f"Could not find {harness} on PATH.")
+    if coordinator_running(root):
+        raise StartupError("An orchestrator is already running in this mailbox. Open its terminal.")
+    token = uuid.uuid4().hex
+    temporary = "copilot-start-" + token
+    command = [str(launcher.with_name("team")), "--launch-pane"]
+    arguments = [*command, "orchestrator", *orchestrator.participant_args()]
+    for project in projects:
+        arguments.extend(["--project", project])
+    # An existing tmux server may have inherited PATH before Copilot was installed.
+    coordinator = tmux("new-session", "-d", "-P", "-F", "#{pane_id}", "-s", temporary,
+                       "-n", "orchestrator", "-c", str(root), "-e", "PATH=" + os.environ["PATH"],
+                       *arguments).stdout.strip()
+    target = "=" + temporary
+    try:
+        expected = {coordinator: "orchestrator"}
+        wait_for_members(temporary, expected)
+        for slot, (project, number) in slots.items():
+            worker = tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", target + ":",
+                          "-n", slot, "-c", str(root), *command, "worker", project, "--worker-number", str(number),
+                          *workers.participant_args()).stdout.strip()
+            expected[worker] = slot
+        wait_for_members(temporary, expected)
+        for pane in expected:
+            tmux("set-option", "-p", "-t", pane, "@mailbox_pane_token", token)
+        tmux("set-option", "-t", target + ":", "@mailbox_team_token", token)
+        tmux("set-option", "-t", target + ":", "@copilot_projects", ",".join(sorted(slots)))
+        tmux("rename-session", "-t", target, name)
+    except BaseException:
+        # The private staging name only exists if this invocation created it.
+        tmux("kill-session", "-t", target, check=False)
+        raise
+
+
+def setup_team(root, projects, orchestrator, workers, new_team=False):
+    launcher = root / "copilot-mailbox" / "start"
+    if not launcher.is_file() or not os.access(launcher, os.X_OK):
+        raise StartupError("The copilot-mailbox/start launcher is missing or cannot be executed.")
+    api = runpy.run_path(str(launcher))
+    slots = worker_slots(projects)
+    unique_projects = list(dict.fromkeys(projects))
+    name = session_name(root)
+    with open_lock(root / ".copilot-mailbox-team.lock") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        registry = api["read_registry"](root)
+        for project in unique_projects:
+            api["working_directory"](registry, project)
+        exists = tmux("has-session", "-t", "=" + name, check=False).returncode == 0
+        if exists and not coordinator_running(root):
+            control = runpy.run_path(str(CONTROL))
+            previous = control["managed_team"](root, include_retired=True)
+            if previous and not previous["owned"]:
+                control["release_surviving_session"](previous)
+                exists = False
+        if not exists:
+            create_team(root, launcher, name, unique_projects, slots, orchestrator, workers)
+        else:
+            if new_team:
+                raise StartupError("Another team just started. Open team again to connect.")
+            stored = tmux("show-options", "-qv", "-t", "=" + name + ":", "@copilot_projects")
+            if stored.stdout.strip() != ",".join(sorted(slots)):
+                raise StartupError("This tmux session has a different team. Check the projects and worker counts.")
+            if not coordinator_running(root):
+                raise StartupError("The orchestrator for this team is no longer running.")
+        roles = pane_roles(name)
+        if sorted(role for role in roles.values() if role) != sorted(["orchestrator", *slots]):
+            raise StartupError("A team member is missing. The other tmux panes are still open.")
+        coordinator = next(pane for pane, role in roles.items() if role == "orchestrator")
+        tmux("select-window", "-t", coordinator, ";", "select-pane", "-t", coordinator)
+    return name
+
+
+class TeamParser(argparse.ArgumentParser):
+    def error(self, message):
+        self.exit(2, "Invalid team arguments. See --help.\n")
+
+
+def main():
+    parser = TeamParser(description="Open the orchestrator and workers in one terminal.",
+                        allow_abbrev=False)
+    parser.add_argument("projects", nargs="+", metavar="PROJECT",
+                        help="repeat a project ID for each additional worker")
+    parser.add_argument("--model", help="default model for both roles")
+    for role in ("orchestrator", "worker"):
+        parser.add_argument(f"--{role}-harness", choices=("copilot", "claude", "codex"), default="copilot")
+        parser.add_argument(f"--{role}-model")
+        parser.add_argument(f"--{role}-effort")
+    parser.add_argument("--new-team", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--reasoning-effort", help="default reasoning effort for the new team")
+    try:
+        if sys.argv[1:2] == ["--launch-pane"]:
+            launch_pane(Path(__file__).resolve().with_name("start"))
+            return
+        args = parser.parse_args()
+        if not sys.stdin.isatty():
+            raise StartupError("Run this command in an interactive terminal.")
+        if not shutil.which("tmux"):
+            raise StartupError("Install tmux to run the team in a shared terminal.")
+        root = Path(__file__).resolve().parent.parent
+        name = setup_team(root, args.projects, settings_for(args, "orchestrator"),
+                          settings_for(args, "worker"), args.new_team)
+        action = "switch-client" if os.environ.get("TMUX") else "attach-session"
+        os.execvp("tmux", ["tmux", action, "-t", "=" + name])
+    except StartupError as error:
+        parser.exit(1, str(error) + "\n")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+        parser.exit(1, "Could not open the team. Check projects.json, the project directories, and tmux.\n")
+
+
+if __name__ == "__main__":
+    main()

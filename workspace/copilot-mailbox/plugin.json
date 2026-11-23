@@ -1,0 +1,6 @@
+{
+  "name": "copilot-mailbox",
+  "description": "Notify an opted-in Copilot CLI session about its local mailbox.",
+  "version": "1.0.0",
+  "extensions": ["./extensions"]
+}

@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""Start an interactive mailbox participant in its registered working directory."""
+import argparse
+import fcntl
+import json
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+
+def read_registry(root):
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    with os.fdopen(os.open(root / "projects.json", flags), "rb") as source:
+        info = os.fstat(source.fileno())
+        limit = 4 * 1024 * 1024
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= limit:
+            raise ValueError
+        data = source.read(limit + 1)
+        if len(data) != info.st_size:
+            raise ValueError
+    try:
+        return json.loads(data.decode("utf-8"))
+    except RecursionError:
+        raise ValueError("Invalid registry nesting") from None
+
+
+def working_directory(registry, project):
+    if project.casefold() == "orchestrator" or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", project):
+        raise ValueError
+    entries = registry.get("projects", registry) if isinstance(registry, dict) else registry
+    if isinstance(entries, dict):
+        entries = [dict(entry, id=entry.get("id", key)) for key, entry in entries.items() if isinstance(entry, dict)]
+    entry, = [entry for entry in entries if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+              and entry["id"].casefold() == project.casefold()]
+    if entry["id"] != project:
+        raise ValueError
+    try:
+        path = Path(entry["working_directory"]).expanduser()
+        if not path.is_absolute() or not path.is_dir():
+            raise ValueError
+        return path.resolve()
+    except RuntimeError:
+        raise ValueError("Unavailable project directory") from None
+
+
+def ensure_route_directories(root, route):
+    """Create only mailbox directories needed by this participant and its peer."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    layout = {"sessions": (), "projects": (), "tasks": ()}
+    for folder in ("inbox", "outbox", "archive"):
+        layout[folder] = {"orchestrator", route}
+    if route != "orchestrator":
+        layout["tasks"] = (route,)
+    base = os.open(root, flags)
+    try:
+        for name, routes in layout.items():
+            parent = open_directory(base, name, flags)
+            try:
+                for recipient in routes:
+                    os.close(open_directory(parent, recipient, flags))
+            finally:
+                os.close(parent)
+    finally:
+        os.close(base)
+
+
+def open_directory(parent, name, flags):
+    try:
+        os.mkdir(name, mode=0o700, dir_fd=parent)
+    except FileExistsError:
+        pass
+    return os.open(name, flags, dir_fd=parent)
+
+
+def copilot_command(args, worker, plugin, cwd, directories):
+    command = ["copilot", "-C", str(cwd), "--experimental", "--plugin-dir", str(plugin),
+               "--agent", "mailbox-worker" if worker else "mailbox-orchestrator"]
+    if args.autopilot:
+        command.append("--autopilot")
+    for directory in directories:
+        command.extend(["--add-dir", str(directory)])
+    for flag, value in (("--model", args.model), ("--reasoning-effort", args.reasoning_effort),
+                        ("--available-tools", args.available_tools),
+                        ("--resume", args.resume)):
+        if value:
+            command.extend([flag, value])
+    for rule in args.allow_tool:
+        command.extend(["--allow-tool", rule])
+    if args.disable_builtin_mcps:
+        command.append("--disable-builtin-mcps")
+    if args.sync_session:
+        command.append("--sync-session=" + args.sync_session)
+    prompt = None if worker else args.objective
+    if prompt:
+        command.extend(["-i", prompt])
+    return command
+
+
+def native_command(args, worker, directories):
+    # Each provider receives an argv vector in its own interactive CLI syntax.
+    command = [args.harness]
+    if args.harness == "codex":
+        # Bind the interactive agent to the pane lifetime, including its running turn.
+        command.append("--no-daemon")
+    if args.model:
+        command.extend(["--model", args.model])
+    if args.reasoning_effort:
+        if args.harness == "codex":
+            command.extend(["-c", "model_reasoning_effort=" + json.dumps(args.reasoning_effort)])
+        else:
+            command.extend(["--effort", args.reasoning_effort])
+    # Codex treats --add-dir as an upfront writable grant and can refuse to start in
+    # a fresh or read-only checkout. Keep its effective permissions and approval flow.
+    if args.harness == "claude":
+        for directory in directories:
+            command.extend(["--add-dir", str(directory)])
+    prompt = (
+        "Read README.md and AGENTS.md under HARNESS_MAILBOX_ROOT (from the process environment), "
+        "including the host adapters in .agents/skills/mailbox-orchestrator/references/host-adapters.md. "
+    )
+    if worker:
+        prompt += (
+            "You are the project worker for HARNESS_MAILBOX_ROUTE. Match the current directory to projects.json. "
+            "Read the project instructions. Self-register only your own session using the receiving worker "
+            "procedure in .agents/skills/mailbox-register-sessions/SKILL.md. "
+            "Use the host's actual session ID or the documented null-ID procedure. "
+            "Other workers may share this project inbox. Only handle messages addressed to your endpoint. "
+            "Inspect your route's inbox and wait for a dependency-gated assignment. Validate its exact message "
+            "with dispatch_task.py and your registered endpoint before performing project work."
+        )
+    else:
+        prompt += (
+            "You are the mailbox orchestrator. Use the mailbox-orchestrator skill for this workspace. "
+            "Inspect the orchestrator inbox and handle registration according to the mailbox protocol. "
+            "When a project has multiple workers, partition assignments by registered endpoint. "
+            "Await the user's objective before dispatching project work."
+        )
+        if args.objective:
+            prompt += "\nUser objective: " + args.objective
+    if args.harness == "codex":
+        prompt += " For required mailbox access, use the current permission profile and its approval flow."
+    command.extend(["--", prompt])
+    return command
+
+
+class ParticipantParser(argparse.ArgumentParser):
+    def error(self, message):
+        self.exit(2, "Invalid participant arguments. See --help.\n")
+
+
+def main(on_ready=None):
+    parser = ParticipantParser(description="Start an orchestrator or worker with the selected harness.",
+                               allow_abbrev=False)
+    parser.add_argument("role", choices=("orchestrator", "worker"))
+    parser.add_argument("project", nargs="?", help="registered project ID for the worker")
+    parser.add_argument("--worker-number", help="worker number within the project")
+    parser.add_argument("--objective", help="initial objective for the orchestrator")
+    parser.add_argument("--project", dest="access_projects", action="append", default=[],
+                        help="add a registered project to the orchestrator's working directories")
+    parser.add_argument("--harness", choices=("copilot", "claude", "codex"), default="copilot")
+    parser.add_argument("--model")
+    parser.add_argument("--reasoning-effort")
+    parser.add_argument("--autopilot", action="store_true", help="enable automatic continuation in Copilot")
+    parser.add_argument("--allow-tool", action="append", default=[])
+    parser.add_argument("--available-tools")
+    parser.add_argument("--resume", metavar="SESSION_UUID")
+    parser.add_argument("--disable-builtin-mcps", action="store_true")
+    parser.add_argument("--sync-session", choices=("on", "off"))
+    args = parser.parse_intermixed_args()
+    worker = args.role == "worker"
+    if worker and (not args.project or args.objective is not None or args.access_projects):
+        parser.exit(2, "Specify one registered project for this worker.\n")
+    if not worker and (args.project is not None or args.worker_number is not None):
+        parser.exit(2, "Use --project to specify the orchestrator's projects.\n")
+    if args.worker_number is None:
+        args.worker_number = "1"
+    if worker and not re.fullmatch(r"[1-9][0-9]*", args.worker_number):
+        parser.exit(2, "The worker number must be a positive integer.\n")
+    if args.harness != "copilot" and any((args.autopilot, args.allow_tool, args.available_tools, args.resume,
+                                         args.disable_builtin_mcps, args.sync_session)):
+        parser.exit(2, "These Copilot options require --harness copilot.\n")
+    plugin = Path(__file__).resolve().parent
+    root = plugin.parent
+    route = args.project if worker else "orchestrator"
+    if worker and (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", route) or route.casefold() == "orchestrator"):
+        parser.exit(2, "Choose a project ID from projects.json.\n")
+    if args.resume and not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", args.resume):
+        parser.exit(2, "Enter the full Copilot session UUID.\n")
+    try:
+        registry = read_registry(root)
+        cwd = working_directory(registry, route) if worker else root
+        extra_directories = [] if worker else [working_directory(registry, name) for name in args.access_projects]
+        ensure_route_directories(root, route)
+        os.chdir(cwd)
+        if not worker:
+            # Keep the lock in the foreground CLI process through exec; the kernel
+            # releases it on exit. Never delete the inode while a listener owns it.
+            lock = os.open(root / ".copilot-mailbox-orchestrator.lock",
+                           os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.set_inheritable(lock, True)
+    except BlockingIOError:
+        parser.exit(1, "An orchestrator is already running in this mailbox.\n")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        parser.exit(1, "Could not open the mailbox or the registered project directory.\n")
+    os.environ.update(HARNESS_MAILBOX_ROOT=str(root), HARNESS_MAILBOX_ROUTE=route,
+                      HARNESS_MAILBOX_CWD=str(cwd))
+    if worker:
+        os.environ["HARNESS_MAILBOX_WORKER_NUMBER"] = args.worker_number
+    else:
+        os.environ.pop("HARNESS_MAILBOX_WORKER_NUMBER", None)
+    directories = [root] if worker else list(dict.fromkeys(extra_directories))
+    if args.harness == "copilot":
+        command = copilot_command(args, worker, plugin, cwd, directories)
+    else:
+        command = native_command(args, worker, directories)
+    try:
+        if on_ready is not None:
+            on_ready()
+        os.execvp(command[0], command)
+    except OSError:
+        parser.exit(1, {"copilot": "Copilot CLI", "codex": "Codex CLI", "claude": "Claude Code"}[args.harness]
+                    + " could not start. Check the installation.\n")
+
+
+if __name__ == "__main__":
+    main()
