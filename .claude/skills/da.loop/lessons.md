@@ -13,6 +13,32 @@ One row per completed run. Numbers come from the run log, never from estimates.
 
 | date | run log | tier | loop ver | delegations | attempts ≥2 | rejected reports | blocking review | gate amends | tokens | wall-clock | lessons (filed / applied / validated / reverted) | fix loops |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-11-15 | `2026-11-15-dependencies.md` | MEDIUM | geo.loop@2026-11-02.3 | 3,maxparallel4inclroot | 1 | 0 | 0 unresolved | 0 | unavailable | 580.884s | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-15 | `2026-11-15-detail-style.md` | LOW | geo.loop@2026-11-02.3 | 3, max parallel 4 | 0 | 0 | 0 unresolved | 0 | unavailable | unavailable | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-15 | `2026-11-15-dispatch-gate.md` | MEDIUM | geo.loop@2026-11-02.3 | 4, max parallel 4 | 4 | 0 | 0 unresolved after fixes | 0 | unavailable | unavailable | 0 / 0 / 0 / 0 | 2 |
+| 2026-11-15 | `2026-11-15-mailbox-dashboard.md` | HIGH | geo.loop@2026-11-02.3 | 2, max parallel 2 | 1 | 0 | 0 unresolved | 1 | unavailable | unavailable | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-15 | `2026-11-15-make-workflow.md` | MEDIUM | geo.loop@2026-11-02.3 | 1, max parallel 2 | 0 | 0 | 0 unresolved | 0 | unavailable | unavailable | 0 / 0 / 0 / 0 | 2 |
+| 2026-11-15 | `2026-11-15-ownership.md` | MEDIUM | geo.loop@2026-11-02.3 | 4, max parallel 4 | 1 | 0 | 0 unresolved | 0 | unavailable | unavailable | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-15 | `2026-11-15-process-orientation.md` | MEDIUM | geo.loop@2026-11-02.3 | 4, max parallel 4 | 2 | 0 | 0 unresolved after fixes | 0 | unavailable | unavailable | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-15 | `2026-11-15-public-release-prep.md` | LOW | geo.loop@2026-11-02.3 | 0 | 0 | 0 | 0 unresolved | 0 | unavailable | unavailable | 0 / 0 / 0 / 0 | 0 |
+| 2026-11-15 | `2026-11-15-task-reconciliation.md` | MEDIUM | geo.loop@2026-11-02.3 | 1, max parallel 2 | 0 | 0 | 0 unresolved | 0 | unavailable | 457 s | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-15 | `2026-11-15-team-filter.md` | MEDIUM | geo.loop@2026-11-02.3 | 1, max parallel 2 | 0 | 0 | 0 unresolved | 0 | unavailable | unavailable | 0 / 0 / 0 / 0 | 0 |
+| 2026-11-23 | `2026-11-23-copilot-mailbox.md` | LOW | da.loop@2026-11-23.1 | 0 | 1 | 0 | 1 fixed | 0 | unavailable | see host timestamps | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-23 | `2026-11-23-copilot-docs.md` | LOW | da.loop@2026-11-23.1 | 0 | 0 | 0 | 0 | 0 | unavailable | unavailable | 0 / 0 / 0 / 0 | 0 |
+| 2026-11-23 | `2026-11-23-copilot-autonomy.md` | HIGH | da.loop@2026-11-23.1 | 3, max parallel 4 | 2 | 0 | 4 fixed | 0 | unavailable | see native timestamps | 0 / 0 / 0 / 0 | 2 |
+| 2026-11-23 | `2026-11-23-copilot-team.md` | MEDIUM | da.loop@2026-11-23.1 | 3, max parallel 4 | 1 | 0 | 3 fixed | 0 | unavailable | see run evidence | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-23 | `2026-11-23-team-ui.md` | MEDIUM | da.loop@2026-11-23.1 | 4, max parallel 4 | 2 | 0 | 2 fixed | 0 | unavailable | see native timestamps | 0 / 0 / 0 / 0 | 2 |
+| 2026-11-23 | `2026-11-23-team-platform.md` | MEDIUM | da.loop@2026-11-23.1 | 4, max parallel 4 | 1 | 0 | 3 fixed | 0 | unavailable | see native evidence | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-23 | `2026-11-23-mixed-team.md` | MEDIUM | da.loop@2026-11-23.1 | 4, max parallel 4 | 2 | 0 | 5 fixed | 0 | unavailable | see native evidence | 0 / 0 / 0 / 0 | 2 |
+| 2026-11-23 | `2026-11-23-folder-navigation.md` | MEDIUM | da.loop@2026-11-23.1 | 3 | 1 | 0 | 1 fixed | 0 | unavailable | see native evidence | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-23 | `2026-11-23-project-removal.md` | MEDIUM | da.loop@2026-11-23.1 | 4, max parallel 4 | 1 | 0 | 3 fixed | 0 | unavailable | see native evidence | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-23 | `2026-11-23-multi-workers.md` | MEDIUM | da.loop@2026-11-23.1 | 4, max parallel 4 | 0 | 0 | 0 | 0 | unavailable | 4m 20s | 0 / 0 / 0 / 0 | 0 |
+| 2026-11-23 | `2026-11-23-team-dashboard.md` | MEDIUM | da.loop@2026-11-23.1 | 3, max parallel 4 | 1 | 0 | 1 fixed | 0 | unavailable | 330s | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-23 | `2026-11-23-team-audit.md` | HIGH | da.loop@2026-11-23.1 | 4, max parallel 4 | 2 | 0 | 0 unresolved | 0 | unavailable | 571s | 0 / 0 / 0 / 0 | 2 |
+| 2026-11-23 | `2026-11-23-team-english.md` | MEDIUM | da.loop@2026-11-23.1 | 4, max parallel 4 | 0 | 0 | 0 | 0 | unavailable | 310s | 0 / 0 / 0 / 0 | 0 |
+| 2026-11-23 | `team-setup.md` | MEDIUM | da.loop@2026-11-23.1 | 4, max parallel 3 peers | 1 | 0 | 3 fixed | 0 | unavailable | 704s | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-23 | `team-full-review.md` | HIGH | da.loop@2026-11-23.1 | 8, max parallel 3 peers | 3 | 0 | final full review clear | 0 | unavailable | 1290s | 0 / 0 / 0 / 0 | 3 |
+| 2026-11-23 | `team-docs-sync.md` | LOW | da.loop@2026-11-23.1 | 0 | 0 | 0 | 0 | 0 | unavailable | 337s | 0 / 0 / 0 / 0 | 0 |
 | 2026-11-23 | multi-project.md | MEDIUM | 2026-11-23.1 | 5 | 0 | 0 | 0 | 0 | unavailable | unavailable | 0 / 0 / 0 / 0 | 0 |
 
 ## Lessons
