@@ -3,6 +3,8 @@
 set -eu
 APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$APP_DIR"
+TEAM_SHELL_PATH=$PATH
+export TEAM_SHELL_PATH
 PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin"
 export PATH
 DOCKER=${DOCKER:-docker}
@@ -43,7 +45,7 @@ doctor_deps() {
 }
 
 doctor_config() {
-    compose config --quiet || fail 'Invalid Compose configuration. Run make setup or set MAILBOX_ROOT to your existing mailbox directory.'
+    compose config --quiet >/dev/null 2>&1 || fail 'Invalid Compose configuration. Run make setup or set MAILBOX_ROOT to your existing mailbox directory.'
     # Compose parses .env safely and applies its normal environment precedence.
     # Do not source .env or print the complete environment (it may contain secrets).
     data_root=$(compose config --environment | sed -n 's/^MAILBOX_ROOT=//p')
@@ -67,7 +69,18 @@ detect_mailbox_root() {
 prepare_config() {
     if [ ! -e .env ]; then
         data_root=${MAILBOX_ROOT:-$(detect_mailbox_root)}
-        [ -n "$data_root" ] || fail 'No mailbox directory detected. Run MAILBOX_ROOT=/absolute/mailbox/path make setup.'
+        if [ -z "$data_root" ]; then
+            data_root="$APP_DIR/mailbox-data"
+            [ ! -L "$data_root" ] || fail 'The default mailbox-data path is a symbolic link. Select the intended mailbox explicitly.'
+            mkdir -p "$data_root" || fail 'Cannot create the local mailbox directory.'
+            if [ ! -e "$data_root/projects.json" ]; then
+                registry_tmp=$(mktemp "$data_root/.projects.XXXXXX")
+                printf '%s\n' '{"projects":[]}' > "$registry_tmp"
+                chmod 644 "$registry_tmp"
+                ln "$registry_tmp" "$data_root/projects.json" 2>/dev/null || [ -f "$data_root/projects.json" ]
+                rm -f "$registry_tmp"
+            fi
+        fi
         case "$data_root" in /*) ;; *) fail 'MAILBOX_ROOT must be an absolute directory path.' ;; esac
         [ -f "$data_root/projects.json" ] || fail 'Selected mailbox directory has no projects.json; .env was not created.'
         # Compose single quotes preserve literal dollars and hashes in paths.
@@ -108,16 +121,39 @@ run_python() {
 
 case "${1:-help}" in
     doctor-deps) doctor_deps ;;
-    doctor) doctor_deps; doctor_config ;;
+    doctor)
+        status=0
+        if ! (PATH=$TEAM_SHELL_PATH; command -v team) >/dev/null 2>&1; then
+            printf '%s\n' 'ERROR: team is missing from PATH. Run make setup, then open a new terminal.' >&2
+            status=1
+        fi
+        if ! PATH=$TEAM_SHELL_PATH tmux -V >/dev/null 2>&1; then
+            printf '%s\n' 'ERROR: tmux is missing. Run make setup.' >&2
+            status=1
+        fi
+        if ! PATH=$TEAM_SHELL_PATH python3 -c 'import curses, fcntl, sys; sys.exit(sys.version_info < (3, 8))' >/dev/null 2>&1; then
+            printf '%s\n' 'ERROR: team needs Python 3.8 or later with curses. Run make setup.' >&2
+            status=1
+        fi
+        (doctor_deps) || status=1
+        # Compose can validate the selected mailbox even while its daemon is stopped.
+        if command -v "$DOCKER" >/dev/null 2>&1; then
+            (doctor_config
+             [ -f "$data_root/install-team.sh" ] || fail 'The team launcher is missing from the mailbox. Run make setup.'
+             PATH=$TEAM_SHELL_PATH sh "$APP_DIR/workspace/install-team.sh" --check "$data_root") || status=1
+        fi
+        exit "$status" ;;
     setup)
         sh scripts/install-system.sh
         doctor_deps
         prepare_config
         doctor_config
+        sh scripts/prepare-team.sh "$data_root"
+        sh "$data_root/install-team.sh"
         build_tools
         "$DOCKER" pull "$NODE_IMAGE"
         compose build
-        printf 'Setup complete. Run make up, then open http://localhost:17171.\n'
+        printf 'Setup complete. Open a new terminal and run team.\n'
         ;;
     build) doctor_deps; doctor_config; compose build ;;
     up) doctor_deps; doctor_config; compose up -d --build --wait ;;
@@ -159,6 +195,8 @@ case "${1:-help}" in
         doctor_deps
         sh -n scripts/workflow.sh
         sh -n scripts/install-system.sh
+        sh -n scripts/prepare-team.sh
+        sh -n workspace/install-team.sh
         "$DOCKER" run --rm --network none --read-only --tmpfs /tmp:rw,exec,nosuid,nodev \
             --mount "type=bind,source=$APP_DIR,target=/workspace,readonly" \
             --workdir /workspace "$NODE_IMAGE" sh -c 'node --check static/app.js && node --check static/theme.js'

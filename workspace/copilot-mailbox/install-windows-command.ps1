@@ -21,6 +21,13 @@ try {
         $installed = [IO.File]::ReadAllText($shim)
         if ($installed -cne $content -and $installed -cne $previousContent) { exit 1 }
     }
+    if ($env:HARNESS_TEAM_CHECK -eq '1') {
+        $registered = @(([string]$userPath -split ';') | ForEach-Object {
+            [Environment]::ExpandEnvironmentVariables($_.Trim().Trim('"')).TrimEnd('\')
+        })
+        if ($installed -cne $content -or $bin -notin $registered) { exit 1 }
+        exit 0
+    }
     if ($installed -cne $content) {
         [void][IO.Directory]::CreateDirectory($bin)
         $temp = Join-Path $bin ([Guid]::NewGuid().ToString() + '.tmp')

@@ -55,6 +55,35 @@ class TeamInstallTests(unittest.TestCase):
         self.assertEqual(call.returncode, 1)
         self.assertIn("Run team in an interactive terminal.", call.stderr)
 
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS shell and Homebrew runtime paths")
+    def test_fresh_zsh_finds_team_and_the_runtime_that_setup_found_in_homebrew(self):
+        for brew_bin in (Path("/opt/homebrew/bin"), Path("/usr/local/bin")):
+            for program in ("tmux", "python3"):
+                executable = brew_bin / program
+                if os.access(executable, os.X_OK):
+                    break
+            else:
+                continue
+            break
+        else:
+            self.skipTest("no team runtime in the macOS package-manager paths")
+        if program == "python3":
+            (self.tools / "python3").unlink()
+        self.env.update(SHELL="/bin/zsh", ZDOTDIR=str(self.home),
+                        TEAM_SHELL_PATH=str(self.tools), PATH=os.pathsep.join([str(self.tools), str(brew_bin)]))
+        installed = self.shell(self.script)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+
+        self.env["PATH"] = self.env["TEAM_SHELL_PATH"]
+        self.assertNotEqual(self.shell(WORKSPACE / "install-team.sh", "--check", self.mailbox).returncode, 0)
+        fresh = subprocess.run(
+            ["/bin/zsh", "-di", "-c", 'command -v team && command -v "$1" && /bin/sh "$2" --check "$3"',
+             "zsh", program, WORKSPACE / "install-team.sh", self.mailbox],
+            env=self.env, cwd=self.cwd, capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(fresh.returncode, 0, fresh.stderr)
+        self.assertEqual(fresh.stdout.splitlines(), [str(self.link), str(executable), "OK: team launcher and PATH"])
+
     def test_windows_entry_starts_the_account_shell_with_its_interactive_cli_path(self):
         # Model the WSL account's login shell and its existing shell-specific startup files.
         (self.home / ".bash_profile").write_text('. "$HOME/.bashrc"\n')
@@ -154,3 +183,52 @@ class TeamInstallTests(unittest.TestCase):
                 if status != "0":
                     self.assertIn("Windows", result.stderr)
                     self.assertNotIn("private fixture error", result.stderr)
+
+    def test_wsl_check_requests_read_only_windows_validation_and_propagates_the_result(self):
+        self.assertEqual(self.shell(self.script).returncode, 0)
+        self.env.update(WSL_DISTRO_NAME="Fixture Distro", WSLENV="EXISTING/u",
+                        PATH=os.pathsep.join([str(self.link.parent), str(self.tools)]))
+        powershell = self.tools / "powershell.exe"
+        powershell.write_text(
+            '#!/bin/sh\n'
+            'printf "%s\\n" "$HARNESS_TEAM_CHECK" "$HARNESS_TEAM_DISTRO" "$WSLENV" > "$HOME/invocation"\n'
+            'cat > "$HOME/input"\n'
+            'printf "private check error\\n" >&2\n'
+            'exit "$MOCK_STATUS"\n'
+        )
+        powershell.chmod(0o755)
+        profile = self.home / ".profile"
+        before = profile.read_bytes()
+        for status in ("0", "1"):
+            with self.subTest(status=status):
+                self.env["MOCK_STATUS"] = status
+                result = self.shell(self.script, "--check")
+                self.assertEqual(result.returncode == 0, status == "0", result.stderr)
+                mode, distro, exported = (self.home / "invocation").read_text().splitlines()
+                self.assertEqual(mode, "1")
+                self.assertEqual(distro, "Fixture Distro")
+                self.assertTrue({"HARNESS_TEAM_CHECK/w", "HARNESS_TEAM_DISTRO/w", "EXISTING/u"}
+                                <= set(exported.split(":")))
+                self.assertEqual((self.home / "input").read_bytes(),
+                                 (self.helper / "install-windows-command.ps1").read_bytes())
+                self.assertTrue(self.link.samefile(self.mailbox / "team"))
+                self.assertEqual(profile.read_bytes(), before)
+                self.assertNotIn("private check error", result.stdout + result.stderr)
+
+    def test_wsl_check_uses_the_checkout_validator_when_the_installed_copy_is_older(self):
+        self.assertEqual(self.shell(self.script).returncode, 0)
+        installed = self.helper / "install-windows-command.ps1"
+        legacy = b"# Legacy installer without check mode\nexit 0\n"
+        installed.write_bytes(legacy)
+        powershell = self.tools / "powershell.exe"
+        powershell.write_text('#!/bin/sh\n[ "$HARNESS_TEAM_CHECK" = 1 ] && cat > "$HOME/input"\n')
+        powershell.chmod(0o755)
+        self.env.update(WSL_DISTRO_NAME="Fixture Distro",
+                        PATH=os.pathsep.join([str(self.link.parent), str(self.tools)]))
+
+        result = self.shell(WORKSPACE / "install-team.sh", "--check", self.mailbox)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.home / "input").read_bytes(),
+                         (WORKSPACE / "copilot-mailbox/install-windows-command.ps1").read_bytes())
+        self.assertEqual(installed.read_bytes(), legacy)

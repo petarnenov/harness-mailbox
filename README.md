@@ -30,11 +30,29 @@ harness-mailbox/
     └── .env            # local configuration, ignored by Git
 ```
 
-Run `make setup` from `dashboard/`; it detects the mailbox by its `projects.json`, in the checkout itself or else in the parent directory. You can also set `MAILBOX_ROOT` explicitly. The source checkout is scoped to the component so private coordination records remain outside the published files. Runtime data stays local and is mounted read-only.
+## Install and run team
 
-## Start with Make
+From the root of a fresh checkout, run:
 
-`make setup` installs missing system tools and prepares the project. On **macOS**, it finds or bootstraps [Homebrew](https://docs.brew.sh/Installation), installs Make and [Docker Desktop](https://formulae.brew.sh/cask/docker-desktop) as needed, and starts Docker Desktop. On **Linux** with `apt-get` or `dnf`, it installs missing Make/curl and uses the [official Docker development installer](https://docs.docker.com/engine/install/ubuntu/#install-using-the-convenience-script) when Docker is absent. If an existing engine only lacks Compose, it installs the [Compose CLI plugin](https://docs.docker.com/compose/install/linux/#install-the-plugin-manually) for the current user without replacing the engine. Existing working dependencies are preserved.
+```sh
+make setup
+```
+
+Open a new terminal and type `team` from any directory. To verify the installation, run `make doctor` from the checkout. You can also run it before setup to see what is missing.
+
+| Platform | Where to run `make setup` and `make doctor` | Where to run `team` |
+| --- | --- | --- |
+| macOS | Terminal | A new terminal |
+| Linux (apt or dnf) | Your shell | A new terminal |
+| Windows | A WSL 2 Linux shell, in the checkout | PowerShell, Command Prompt, or the installing WSL distribution |
+
+On Windows, clone the repository **inside the WSL distribution** (for example, under `~/src`). Keep Windows interoperability enabled. If you use Docker Desktop, enable WSL integration for that distribution. On a clean apt- or dnf-based WSL distribution, setup can install Docker Engine directly using systemd. Setup registers the Windows command for your user and binds it to that distribution.
+
+Setup prepares a private `mailbox-data/` directory and an empty project registry for a standalone checkout. It installs the launcher, checks Python with curses and tmux, and builds the dashboard. Choose your first project in the `team` menu. Install and sign in to the harness CLIs you plan to use in the same environment as the mailbox.
+
+## System dependencies
+
+On **macOS**, setup uses Homebrew to install missing prerequisites and starts Docker Desktop when needed. On **Linux** with apt or dnf, setup installs missing prerequisites and can install Docker Engine and the Compose plugin. On all three platforms, doctor checks the launcher, its shell PATH, the team runtime, Docker and the configured mailbox. On Windows it also validates the PowerShell/Command Prompt launcher and its registered user PATH.
 
 If Make is not installed yet, bootstrap it from the component directory first:
 
@@ -45,7 +63,7 @@ export PATH="/opt/homebrew/opt/make/libexec/gnubin:/usr/local/opt/make/libexec/g
 make setup
 ```
 
-System installation may request administrator authentication. Docker Desktop may require you to finish its first-run prompts; setup waits for readiness for up to 120 seconds and reports an actionable error if it cannot proceed. On Linux, an existing engine must be accessible to your account; setup does not change socket permissions or grant group access. Unsupported systems fail explicitly; use WSL2 on Windows. Python, Node and coverage are installed in isolated container environments; local Python/Node installations are unnecessary. `make doctor` only checks and never invokes the installer.
+System installation may request administrator authentication. Docker Desktop may require you to finish its first-run prompts; setup waits for readiness for up to 120 seconds and reports an actionable error if it cannot proceed. On Linux, an existing engine must be accessible to your account; setup does not change socket permissions or grant group access. The team menu uses local Python. Dashboard development tests and coverage run inside containers. `make doctor` only checks and never invokes the installer.
 
 From an existing mailbox workspace, install the component if `dashboard/` is absent:
 
@@ -73,8 +91,8 @@ Open **http://localhost:17171**. The service binds only to `127.0.0.1`, runs as 
 | Command | Purpose |
 | --- | --- |
 | `make` / `make help` | List commands |
-| `make setup` | Install missing system tools, prepare configuration and container dependencies |
-| `make doctor` | Check Docker CLI, Compose, daemon and mailbox configuration without changes |
+| `make setup` | Install team, prepare the mailbox and build container dependencies |
+| `make doctor` | Check team, PATH, runtime dependencies, Docker and mailbox configuration without changes |
 | `make doctor-deps` | Check the Docker prerequisites without requiring mailbox configuration |
 | `make up` / `make start` | Build current source, start, and wait for a healthy dashboard |
 | `make down` / `make stop` | Stop the mailbox dashboard |
@@ -112,13 +130,7 @@ The sticky header contains five page tabs: **Overview**, **Dependencies**, **Tas
 
 The dashboard is independent of the agent host. Codex, Claude Code, GitHub Copilot or another local tool can produce the same JSON snapshots using the contract below; the application only reads files. The workspace skills define discovery and message delivery for each host. The displayed agent effort model is a planning convention, not a connection to an agent or billing API.
 
-Copy `workspace/team`, `workspace/install-team.sh`, and the complete `workspace/copilot-mailbox/` directory into the mailbox root alongside `projects.json`, preserving executable permissions. Install the per-user command from that directory:
-
-```sh
-sh install-team.sh
-```
-
-Run the installer on macOS, Linux, or in the WSL 2 distribution containing the mailbox. Use Python 3 with curses, and install tmux and sign in to each selected harness CLI in the same environment. Registry paths must resolve there. On Windows, the installer also adds a per-user `team.cmd` to the Windows PATH for PowerShell and Command Prompt. It targets the installing WSL distribution even when another distribution is the default. Reopen the terminal after installation. If Windows still has the old PATH, sign out and back in.
+The same `make setup` installs the launcher for all supported harnesses. Each project path must be accessible from the environment in which its harness runs. On Windows, reopen your terminal after setup so PowerShell or Command Prompt picks up the updated user PATH.
 
 Opening `team` starts the local dashboard at **http://localhost:17171** if its Docker Compose service is stopped or missing. Opening the menu again leaves a running container in place. If Docker is unavailable, the menu shows a warning and you can still manage the team.
 

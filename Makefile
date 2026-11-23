@@ -10,10 +10,10 @@ export DOCKER PROJECT_NAME NODE_IMAGE
 help: ## Show the supported workflow commands
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  make %-14s %s\n", $$1, $$2}' Makefile
 
-setup: ## Install container dependencies, prepare configuration and build
+setup: ## Install team, prepare the mailbox and build the dashboard
 	@sh scripts/workflow.sh setup
 
-doctor: ## Check dependencies and mailbox configuration without changes
+doctor: ## Check team, PATH, Docker and mailbox configuration without changes
 	@sh scripts/workflow.sh doctor
 
 doctor-deps: ## Check Docker CLI, Compose and daemon only

@@ -1,0 +1,29 @@
+name: Team setup
+
+on: [push, pull_request]
+permissions:
+  contents: read
+
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test setup, diagnosis and the shell launcher
+        run: |
+          python3 -m unittest discover -s tests -p test_system_setup.py
+          python3 -m unittest discover -s tests -p test_workflow.py
+          python3 -m unittest discover -s tests -p test_team_install.py
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Windows PowerShell command registration and diagnostics
+        env:
+          TEAM_WINDOWS_DISPOSABLE_TEST: '1'
+        run: python -m unittest discover -s tests -p test_windows_team_setup.py -v

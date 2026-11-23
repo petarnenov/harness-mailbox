@@ -64,11 +64,13 @@ class WorkflowTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name) / 'mailbox space $ #'
+        self.root = Path(self.temp.name).resolve() / 'mailbox space $ #'
         self.app = self.root / 'dashboard'
-        (self.app / 'scripts').mkdir(parents=True)
         source = Path(__file__).resolve().parents[1]
-        for name in ('scripts/workflow.sh', 'scripts/install-system.sh', 'workspace.Makefile', 'compose.yaml'):
+        for directory in ('scripts', 'workspace'):
+            shutil.copytree(source / directory, self.app / directory, symlinks=True,
+                            ignore=shutil.ignore_patterns('__pycache__'))
+        for name in ('Makefile', 'workspace.Makefile', 'compose.yaml', 'README.md'):
             shutil.copyfile(source / name, self.app / name)
         # Installer behavior has its own fully mocked test suite. Keep workflow
         # tests incapable of invoking any host package manager or network fetch.
@@ -80,8 +82,16 @@ class WorkflowTests(unittest.TestCase):
         self.docker = Path(self.temp.name) / 'fake docker'
         self.docker.write_text('#!' + sys.executable + '\n' + FAKE_DOCKER)
         self.docker.chmod(0o755)
-        self.env = {k: v for k, v in os.environ.items() if k not in ('MAILBOX_ROOT', 'DOCKER', 'PROJECT_NAME')}
-        self.env.update(DOCKER=str(self.docker), DOCKER_LOG=str(self.log), INSTALLER_LOG=str(self.installer_log))
+        self.home = Path(self.temp.name).resolve() / 'home'
+        self.home.mkdir()
+        self.bin = self.home / '.local' / 'bin'
+        tools = self.home / 'test-tools'
+        tools.mkdir()
+        (tools / 'python3').symlink_to(sys.executable)
+        (tools / 'tmux').write_text('#!/bin/sh\nprintf "tmux 3.4\n"\n')
+        (tools / 'tmux').chmod(0o755)
+        self.env = dict(HOME=str(self.home), SHELL='/bin/sh', PATH=f'{tools}:/usr/bin:/bin',
+                        DOCKER=str(self.docker), DOCKER_LOG=str(self.log), INSTALLER_LOG=str(self.installer_log))
 
     def run_workflow(self, command, **changes):
         return subprocess.run(['sh', str(self.app / 'scripts/workflow.sh'), command],
@@ -174,13 +184,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(sum('up' in call['args'] for call in self.calls()), 1)
 
     def test_doctor_is_read_only_and_reports_dependencies(self):
-        (self.app / '.env').write_text("MAILBOX_ROOT='" + str(self.root) + "'\n")
-        before = (self.app / '.env').read_bytes()
-        result = self.run_workflow('doctor')
+        result = self.run_workflow('setup')
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.log.unlink()
+        self.installer_log.unlink()
+        before = {p: p.read_bytes() for p in (self.app / '.env', self.root / 'Makefile', self.home / '.profile')}
+        result = self.run_workflow('doctor', PATH=f"{self.bin}:{self.env['PATH']}")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn('OK: Compose configuration', result.stdout)
-        self.assertEqual(before, (self.app / '.env').read_bytes())
-        self.assertFalse((self.root / 'Makefile').exists())
+        self.assertIn('team', result.stdout.lower())
+        self.assertEqual(before, {p: p.read_bytes() for p in before})
         self.assertFalse(self.installer_log.exists())
         self.assertTrue(all(c['args'][0] in ('--version', 'info', 'compose') for c in self.calls()))
         self.assertTrue(all(c['args'][7] == 'config' or '--help' in c['args']
@@ -251,11 +264,89 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(any(c['args'][0] in ('build', 'pull') for c in self.calls()))
         self.assertNotEqual(0, self.run_workflow('setup', MAILBOX_ROOT='relative').returncode)
 
-    def test_no_mailbox_does_not_create_env_or_root_makefile(self):
+    def test_doctor_identifies_a_missing_team_with_a_working_dashboard(self):
+        (self.app / '.env').write_text(f"MAILBOX_ROOT='{self.root}'\n")
+        result = self.run_workflow('doctor')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('team', result.stderr.lower())
+        self.assertIn('make setup', result.stderr)
+        self.assertFalse(self.installer_log.exists())
+
+    def test_doctor_reports_both_missing_team_and_unavailable_docker_on_fresh_checkout(self):
         (self.root / 'projects.json').unlink()
+        result = self.run_workflow('doctor', FAIL_DAEMON='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('daemon is unavailable', result.stderr)
+        self.assertIn('team', result.stderr.lower())
+        self.assertIn('make setup', result.stderr)
+        for path in (self.app / '.env', self.app / 'mailbox-data', self.bin, self.home / '.profile'):
+            self.assertFalse(path.exists(), path)
+        self.assertFalse(self.installer_log.exists())
+
+    def test_fresh_checkout_setup_installs_team(self):
+        (self.root / 'projects.json').unlink()
+        profile = self.home / '.profile'
+        profile.write_text('# existing profile\n')
         result = self.run_workflow('setup')
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn('No mailbox directory detected', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        mailbox = self.app / 'mailbox-data'
+        registry = mailbox / 'projects.json'
+        self.assertEqual(json.loads(registry.read_text()), {'projects': []})
+        self.assertEqual((self.app / '.env').read_text(), f"MAILBOX_ROOT='{mailbox}'\n")
+        self.assertTrue((self.bin / 'team').samefile(mailbox / 'team'))
+        self.assertTrue((mailbox / 'dashboard/scripts/workflow.sh').samefile(self.app / 'scripts/workflow.sh'))
+        for name in ('README.md', 'AGENTS.md', 'copilot-mailbox/extensions/mailbox/extension.mjs'):
+            self.assertTrue((mailbox / name).is_file(), name)
+        self.assertIn('# existing profile', profile.read_text())
+        doctor = subprocess.run(['sh', '-c', '. "$HOME/.profile" && exec make doctor'], env=self.env,
+                                cwd=self.app, text=True, capture_output=True, timeout=20)
+        self.assertEqual(doctor.returncode, 0, doctor.stderr)
+        self.assertIn('team', doctor.stdout.lower())
+        launch = subprocess.run(['sh', '-c', '. "$HOME/.profile" && exec team'], env=self.env,
+                                cwd=self.temp.name, text=True, capture_output=True, timeout=10)
+        self.assertEqual(launch.stderr.strip(), 'Run team in an interactive terminal.')
+        registry.write_text('{"projects":[{"project_id":"fixture"}]}')
+        (mailbox / 'AGENTS.md').write_text('# Custom mailbox instructions\n')
+        before = {p: p.read_bytes() for p in (registry, profile, mailbox / 'AGENTS.md', self.app / '.env')}
+        result = self.run_workflow('setup')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(before, {p: p.read_bytes() for p in before})
+
+    def test_doctor_diagnoses_a_shadowed_team_without_executing_it(self):
+        result = self.run_workflow('setup')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        foreign = self.home / 'test-tools/team'
+        foreign.write_text('#!/bin/sh\nprintf "synthetic-private-detail" > "$HOME/foreign-called"\n')
+        foreign.chmod(0o755)
+        result = self.run_workflow('doctor', PATH=f"{self.env['PATH']}:{self.bin}")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('team', result.stderr.lower())
+        self.assertNotIn('synthetic-private-detail', result.stderr)
+        self.assertFalse((self.home / 'foreign-called').exists())
+
+    def test_setup_does_not_deploy_through_a_symlinked_plugin_directory(self):
+        external = self.home / 'project'
+        external.mkdir()
+        sentinel = external / 'start'
+        sentinel.write_text('original project file')
+        (self.root / 'copilot-mailbox').symlink_to(external, target_is_directory=True)
+        result = self.run_workflow('setup')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(list(external.iterdir()), [sentinel])
+        self.assertEqual(sentinel.read_text(), 'original project file')
+
+    def test_fresh_setup_does_not_create_a_registry_through_a_symlinked_mailbox_data(self):
+        (self.root / 'projects.json').unlink()
+        external = self.home / 'external'
+        external.mkdir()
+        (self.app / 'mailbox-data').symlink_to(external, target_is_directory=True)
+        result = self.run_workflow('setup')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(list(external.iterdir()), [])
+        self.assertFalse((self.app / '.env').exists())
+
+    def test_setup_rejects_an_explicit_directory_without_a_registry(self):
+        (self.root / 'projects.json').unlink()
         result = self.run_workflow('setup', MAILBOX_ROOT=str(self.root))
         self.assertNotEqual(0, result.returncode)
         self.assertFalse((self.app / '.env').exists())
@@ -290,9 +381,10 @@ class WorkflowTests(unittest.TestCase):
         special.mkdir()
         (special / 'dashboard').symlink_to(self.app, target_is_directory=True)
         shutil.copyfile(self.app / 'workspace.Makefile', special / 'Makefile')
-        (self.app / 'Makefile').write_text('doctor:\n\t@sh scripts/workflow.sh doctor\n')
+        setup = self.run_workflow('setup')
+        self.assertEqual(0, setup.returncode, setup.stderr)
         result = subprocess.run(['make', 'doctor'], cwd=special,
-                                env=dict(self.env, MAILBOX_ROOT=str(self.root)),
+                                env=dict(self.env, MAILBOX_ROOT=str(self.root), PATH=f"{self.bin}:{self.env['PATH']}"),
                                 text=True, capture_output=True, timeout=20)
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn('OK: Compose configuration', result.stdout)
