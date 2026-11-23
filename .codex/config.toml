@@ -1,0 +1,23 @@
+# rendered by .claude/skills/da.loop/scripts/render-agents.mjs from .claude/agents/{agents}.md — do not edit
+# Project layer for Codex CLI; loads once this checkout is a trusted project.
+model_reasoning_effort = "low"
+
+[agents]
+default_subagent_model = "gpt-6-luna"
+default_subagent_reasoning_effort = "low"
+
+[agents.da-python-writer]
+description = "Writes Python production code for the harness-mailbox dashboard: standard-library read-only server, dispatch gate, workspace orchestrator scripts, buildless JavaScript frontend and Docker/Make workflow. Production code only; tests are handed to da-python-test-writer."
+config_file = "agents/da-python-writer.toml"
+
+[agents.da-python-test-writer]
+description = "Writes unittest and node --test tests for the harness-mailbox dashboard, bringing every touched production module to at least 85% measured line coverage. Tests only; never edits production code."
+config_file = "agents/da-python-test-writer.toml"
+
+[agents.da-python-reviewer]
+description = "Read-only review of harness-mailbox dashboard Python, JavaScript, workspace scripts, Docker/Make and tests against accepted criteria and project rulebooks. Checks read-only/gate safety and at least 85% measured coverage for touched production modules."
+config_file = "agents/da-python-reviewer.toml"
+
+[agents.da-lesson-reviewer]
+description = "Reviews one proposed da.loop lesson before write-back: checks that it is stack-level, supported by evidence, correctly targeted and consistent with existing rules. Read-only."
+config_file = "agents/da-lesson-reviewer.toml"

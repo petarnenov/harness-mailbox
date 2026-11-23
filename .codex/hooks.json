@@ -1,0 +1,28 @@
+{
+  "description": "da.loop G1 gate: no G1 approval request before the spec review is recorded (see .claude/skills/da.loop/SKILL.md step 4). Trust it with /hooks after reviewing scripts/g1-spec-review-hook.mjs.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "request_user_input",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$(git rev-parse --show-toplevel 2>/dev/null)/.claude/skills/da.loop/scripts/g1-spec-review-hook.mjs\"; [ ! -f \"$f\" ] || ! command -v node >/dev/null || node \"$f\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$(git rev-parse --show-toplevel 2>/dev/null)/.claude/skills/da.loop/scripts/g1-spec-review-hook.mjs\"; [ ! -f \"$f\" ] || ! command -v node >/dev/null || node \"$f\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

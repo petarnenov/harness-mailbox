@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "f=\"$(git rev-parse --show-toplevel 2>/dev/null)/.claude/skills/da.loop/scripts/g1-spec-review-hook.mjs\"; [ ! -f \"$f\" ] || ! command -v node >/dev/null || node \"$f\" --host copilot --event PreToolUse",
+        "cwd": ".",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}

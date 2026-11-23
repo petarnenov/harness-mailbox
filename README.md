@@ -114,6 +114,12 @@ The dashboard is independent of the agent host. Codex, Claude Code, GitHub Copil
 
 The workspace template includes two Copilot CLI profiles. Install `workspace/.github/agents/mailbox-*.agent.md` under the mailbox's `.github/agents/` alongside the standard workspace skills. Follow the [two-terminal Copilot walkthrough](workspace/.agents/skills/mailbox-orchestrator/references/host-adapters.md#starting-copilot-cli) to start both roles, register the exact worker session and verify a read-only task through its receipts and reply.
 
+## Delivery package
+
+Changes to this repository go through the `da.loop` delivery skill: `/da.loop <goal>` in Claude Code and Copilot, `$da.loop <goal>` in Codex. `da.commit`, `da.merge <branch>` and `da.sync <project path>` cover commit triage, merges and replication; `da.jira.comment`, `da.jira.estimate.hh` and `da.jira.retro` need an explicit ticket or board and keep their write-confirmation gates. The mailbox workspace's Jira policy still applies to work coordinated through the mailbox.
+
+Canonical skills live in `.claude/skills/da*` and agents in `.claude/agents/da-*.md`; `.agents/skills/da*` holds one relative symlink per skill for Codex. This is a deliberate exception to the workspace convention that `.agents/skills/` is the single source: the package's sync and renderer scripts require the `.claude/` layout. After editing a canonical agent, run `node .claude/skills/da.loop/scripts/render-agents.mjs` to update the Codex and Copilot adapters. The rulebooks are `.claude/skills/da-python-conventions/SKILL.md` and `.claude/skills/da-python-test-conventions/SKILL.md`; commands are in `.claude/skills/da.loop/references/stack.md`. The Codex G1 hook in `.codex/hooks.json` needs project trust through `/hooks`; review `.claude/skills/da.loop/scripts/g1-spec-review-hook.mjs` first. Run history under `.claude/goal-runs/` stays local.
+
 ## Snapshot contract
 
 The backend reads only these JSON paths, with a 4 MB per-file bound. Paths outside the data root and symlink files are rejected. Malformed records produce data-quality warnings; valid sources continue to display. Unknown fields are not used to infer completion. Writers should publish snapshots atomically as required by the mailbox protocol.
