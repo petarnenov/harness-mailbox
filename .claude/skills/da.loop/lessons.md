@@ -40,6 +40,7 @@ One row per completed run. Numbers come from the run log, never from estimates.
 | 2026-11-23 | `team-full-review.md` | HIGH | da.loop@2026-11-23.1 | 8, max parallel 3 peers | 3 | 0 | final full review clear | 0 | unavailable | 1290s | 0 / 0 / 0 / 0 | 3 |
 | 2026-11-23 | `team-docs-sync.md` | LOW | da.loop@2026-11-23.1 | 0 | 0 | 0 | 0 | 0 | unavailable | 337s | 0 / 0 / 0 / 0 | 0 |
 | 2026-11-23 | multi-project.md | MEDIUM | 2026-11-23.1 | 5 | 0 | 0 | 0 | 0 | unavailable | unavailable | 0 / 0 / 0 / 0 | 0 |
+| 2026-11-23 | inbound.md | HIGH | 2026-11-23.1 | 3 | 1 | 1 | 1 | 0 | 336429 | 327s | 0 / 0 / 0 / 0 | 1 |
 
 ## Lessons
 

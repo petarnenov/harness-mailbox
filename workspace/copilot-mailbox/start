@@ -139,7 +139,11 @@ def native_command(args, worker, directories):
             "You are the mailbox orchestrator. Use the mailbox-orchestrator skill for this workspace. "
             "Inspect the orchestrator inbox and handle registration according to the mailbox protocol. "
             "When a project has multiple workers, partition assignments by registered endpoint. "
-            "Await the user's objective before dispatching project work."
+            "Await the user's objective before dispatching project work. Registration alone stays idle. "
+            "During an active objective, answer status and continue with pending decisions. "
+            "Honor explicit pause, stop and status-only instructions. "
+            "This native launcher installs no mailbox listener. Follow the skill's inbox wait of at most 60 seconds "
+            "until this session has confirmed inbound wake for the expected event."
         )
         if args.access_projects:
             prompt += " Selected project IDs: " + ", ".join(dict.fromkeys(args.access_projects)) + "."

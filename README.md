@@ -136,6 +136,8 @@ The dashboard is independent of the agent host. Codex, Claude Code, GitHub Copil
 3. Choose the orchestrator’s harness, model and reasoning effort, then configure the workers. Each role can use GitHub Copilot, Claude Code or Codex. All workers use the worker configuration. Select **Automatic selection** to use the harness default, press `R` to refresh its model catalog, or enter a model ID manually. The effort picker appears when the catalog lists reasoning levels for the model. Claude model labels show the CLI’s current display name alongside its launch ID.
 4. On **Review team**, select **Start team**. Give the objective in the orchestrator window. For a first check, enter “Ask each selected worker to report its current branch and HEAD commit, then summarize the confirmed replies.” With the default tmux bindings, press `Ctrl-b` then `w` to visit worker windows for first-run trust or sign-in prompts.
 
+During an active objective, a status question gets a progress update and the orchestrator continues handling pending decisions. Ask explicitly for a pause, stop or status-only report to suspend that work. While awaiting a worker event, the orchestrator checks its inbox at least once every 60 seconds unless its own session can wake on that event. Registration alone leaves it idle after inventory.
+
 The menu opens in dark mode on first use and remembers your theme. Press `T` to switch themes or Ctrl-T while editing an ID. New participants inherit the launching shell’s provider configuration directories. Each CLI handles its own trust prompts and permissions.
 
 ### Manage projects and sessions

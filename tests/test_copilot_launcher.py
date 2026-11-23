@@ -142,6 +142,9 @@ class CopilotLauncherTests(unittest.TestCase):
                     self.assertIn('HARNESS_MAILBOX_ROOT', argv[-1])
                     if role == 'orchestrator':
                         self.assertIn('Review the sample', argv[-1])
+                        self.assertIn('60', argv[-1])
+                        for instruction in ('status', 'pause', 'stop', 'status-only'):
+                            self.assertIn(instruction, argv[-1].lower())
                         self.assertNotIn('--model', argv)
                         self.assertNotIn('--effort', argv)
                     else:
