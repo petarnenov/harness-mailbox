@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,13 @@ with open(os.environ['INSTALL_LOG'], 'a') as log:
     log.write(json.dumps([name] + args) + '\n')
 def save():
     state_file.write_text(json.dumps(state))
+def install_team_packages():
+    if 'install' in args and not state.get('runtime_install_failed'):
+        if any(package in args for package in ('python', 'python3')):
+            state['bad_python'] = False
+        if 'tmux' in args:
+            state['bad_tmux'] = False
+        save()
 if name == 'docker':
     if args == ['--version']: sys.exit(0 if state['cli'] else 1)
     if args == ['info']: sys.exit(0 if state['daemon'] else 1)
@@ -32,7 +40,15 @@ elif name == 'id':
     print(state.get('uid', '0'))
 elif name == 'make':
     sys.exit(1 if state.get('bad_make') else 0)
+elif name == 'tmux':
+    sys.exit(1 if state.get('bad_tmux') or args != ['-V'] else 0)
+elif name == 'python3':
+    if state.get('bad_python'):
+        print('private runtime diagnostic', file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
 elif name == 'brew':
+    install_team_packages()
     if args == ['--prefix', 'make']:
         print(os.environ['FAKE_BREW_PREFIX'])
     if args == ['install', 'make']:
@@ -45,6 +61,7 @@ elif name == 'brew':
         state.update(cli=True, compose=True)
         save()
 elif name in ('apt-get', 'dnf'):
+    install_team_packages()
     if 'make' in args:
         state['bad_make'] = False
         save()
@@ -87,7 +104,8 @@ class SystemSetupTests(unittest.TestCase):
         self.state = self.root / 'state.json'
         self.log = self.root / 'log.jsonl'
         self.script = Path(__file__).resolve().parents[1] / 'scripts/install-system.sh'
-        for name in ('docker', 'make', 'uname', 'id', 'brew', 'open', 'systemctl', 'sudo', 'curl', 'apply-install', 'apt-get', 'dnf'):
+        for name in ('docker', 'make', 'uname', 'id', 'brew', 'open', 'systemctl', 'sudo', 'curl',
+                     'apply-install', 'apt-get', 'dnf', 'python3', 'tmux'):
             tool = self.bin / name
             tool.write_text('#!' + sys.executable + '\n' + FAKE_TOOL)
             tool.chmod(0o755)
@@ -95,6 +113,7 @@ class SystemSetupTests(unittest.TestCase):
                         DOCKER=str(self.bin / 'docker'), INSTALL_STATE=str(self.state), INSTALL_LOG=str(self.log),
                         DOCKER_CONFIG=str(self.root / 'docker-config'), DOCKER_WAIT_SECONDS='0',
                         FAKE_BREW_PREFIX=str(self.root / 'brew-make'))
+        self.env.pop('WSL_DISTRO_NAME', None)
 
     def run_setup(self, **state):
         data = dict(cli=True, compose=True, daemon=True, system='Linux')
@@ -110,7 +129,56 @@ class SystemSetupTests(unittest.TestCase):
         result = self.run_setup()
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn('no installation needed', result.stdout)
-        self.assertTrue(all(x[0] in ('docker', 'make') for x in self.calls()))
+        self.assertTrue(all(x[0] in ('docker', 'make', 'python3', 'tmux') for x in self.calls()))
+
+    def test_team_dependencies_are_installed_even_when_docker_is_healthy(self):
+        for platform, manager, python_package in [('Darwin', 'brew', 'python'), ('Linux', 'apt-get', 'python3'),
+                                                   ('WSL', 'apt-get', 'python3'), ('Linux', 'dnf', 'python3')]:
+            with self.subTest(platform=platform, manager=manager):
+                self.log.unlink(missing_ok=True)
+                if platform == 'WSL':
+                    self.env['WSL_DISTRO_NAME'] = 'Fixture Distro'
+                else:
+                    self.env.pop('WSL_DISTRO_NAME', None)
+                if manager == 'dnf':
+                    (self.bin / 'apt-get').unlink()
+                    self.env['PATH'] = str(self.bin)
+                    (self.bin / 'sh').symlink_to(shutil.which('sh'))
+                result = self.run_setup(system='Darwin' if platform == 'Darwin' else 'Linux',
+                                        bad_python=True, bad_tmux=True)
+                self.assertEqual(0, result.returncode, result.stderr)
+                calls = self.calls()
+                packages = {arg for call in calls if call[:2] == [manager, 'install'] for arg in call[2:]}
+                self.assertTrue({python_package, 'tmux'} <= packages, calls)
+                self.assertFalse(any(call[0] in ('open', 'curl', 'apply-install', 'systemctl') for call in calls))
+
+    def isolated_wsl(self):
+        self.env['WSL_DISTRO_NAME'] = 'Fixture Distro'
+        self.env['PATH'] = str(self.bin)
+        for tool in ('sh', 'mktemp', 'rm'):
+            (self.bin / tool).symlink_to(shutil.which(tool))
+
+    def test_wsl_with_desktop_reports_missing_integration_without_installing_a_second_engine(self):
+        self.isolated_wsl()
+        (self.bin / 'docker.exe').symlink_to(self.bin / 'docker')
+        result = self.run_setup(cli=False, compose=False, daemon=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Docker Desktop', result.stderr)
+        self.assertFalse(any(call[0] in ('curl', 'apply-install', 'systemctl') for call in self.calls()))
+
+    @unittest.skipIf(Path('/mnt/wsl/docker-desktop').is_dir(), 'host has an active WSL Docker Desktop mount')
+    def test_wsl_without_desktop_installs_and_starts_a_linux_engine(self):
+        self.isolated_wsl()
+        result = self.run_setup(cli=False, compose=False, daemon=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(['apply-install'], self.calls())
+        self.assertIn(['systemctl', 'start', 'docker'], self.calls())
+
+    def test_an_unusable_runtime_after_installation_stops_setup_with_a_fixed_diagnostic(self):
+        result = self.run_setup(bad_python=True, runtime_install_failed=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Python', result.stderr)
+        self.assertNotIn('private runtime diagnostic', result.stdout + result.stderr)
 
     def test_macos_installs_missing_desktop_then_starts_it(self):
         result = self.run_setup(cli=False, compose=False, daemon=False, system='Darwin')

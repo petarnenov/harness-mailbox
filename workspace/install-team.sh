@@ -3,25 +3,49 @@
 set -eu
 fail() { printf '%s\n' "$1" >&2; exit 1; }
 
-mailbox=$(CDPATH='' cd -P "$(dirname "$0")" && pwd -P)
+package=$(CDPATH='' cd -P "$(dirname "$0")" && pwd -P)
+mailbox=$package
+check=0
+if [ "${1:-}" = --check ]; then
+    check=1
+    if [ -n "${2:-}" ]; then mailbox=$2; fi
+fi
 launcher="$mailbox/team"
 bin="$HOME/.local/bin"
 link="$bin/team"
 
 for command_path in "$launcher" "$mailbox/copilot-mailbox/team" "$mailbox/copilot-mailbox/start"; do
     [ -f "$command_path" ] && [ -x "$command_path" ] ||
-        fail 'A launcher is missing or is not executable. Check team and copilot-mailbox in your installation.'
+        fail 'A team launcher is missing or is not executable. Run make setup.'
 done
 [ -f "$mailbox/copilot-mailbox/team_ui_data.py" ] &&
     [ -f "$mailbox/copilot-mailbox/team_control.py" ] && [ -f "$mailbox/projects.json" ] ||
-    fail 'Run the installer from the mailbox directory containing team and projects.json.'
-python3 -c 'import curses, fcntl' >/dev/null 2>&1 ||
-    fail 'team requires Python 3 with curses on Linux, macOS, or WSL.'
+    fail 'The team installation is incomplete. Run make setup.'
+python3 -c 'import curses, fcntl, sys; sys.exit(sys.version_info < (3, 8))' >/dev/null 2>&1 ||
+    fail 'team requires Python 3.8 or later with curses. Run make setup.'
+
+windows_command() {
+    # During diagnosis the installed copy may predate support for read-only checks.
+    windows_installer="$package/copilot-mailbox/install-windows-command.ps1"
+    command -v powershell.exe >/dev/null 2>&1 && [ -r "$windows_installer" ] ||
+        fail 'To use team from Windows, enable WSL interoperability and make powershell.exe available on your PATH.'
+    HARNESS_TEAM_DISTRO="$WSL_DISTRO_NAME" HARNESS_TEAM_CHECK="$check" \
+        WSLENV="HARNESS_TEAM_DISTRO/w:HARNESS_TEAM_CHECK/w${WSLENV:+:$WSLENV}" \
+        powershell.exe -NoLogo -NoProfile -NonInteractive -Command - < "$windows_installer" >/dev/null 2>&1 ||
+        fail 'Windows team command or user PATH is unavailable or in conflict. Run make setup and reopen the terminal.'
+}
 
 # Keep an existing command (including a dangling link) owned by another tool.
 existing=$(command -v team || :)
 if [ -n "$existing" ] && ! [ "$existing" -ef "$launcher" ]; then
     fail 'Another team command is already on your PATH.'
+fi
+if [ "$check" = 1 ]; then
+    [ "$link" -ef "$launcher" ] || fail 'The team command is missing or belongs to another mailbox. Run make setup.'
+    [ -n "$existing" ] || fail 'team is installed outside the current PATH. Open a new terminal after make setup.'
+    if [ -n "${WSL_DISTRO_NAME:-}" ]; then windows_command; fi
+    printf '%s\n' 'OK: team launcher and PATH'
+    exit 0
 fi
 mkdir -p "$bin" 2>/dev/null || fail 'Cannot access your local bin directory.'
 if [ -e "$link" ] || [ -L "$link" ]; then
@@ -32,6 +56,19 @@ fi
 
 # Add the user bin to fresh interactive shells when the caller does not have it yet.
 path_rule='export PATH="$HOME/.local/bin:$PATH"'
+shell_path=${TEAM_SHELL_PATH:-$PATH}
+brew_bin=
+for program in tmux python3; do
+    program_path=$(command -v "$program" || :)
+    case "$program_path" in
+        /opt/homebrew/bin/*|/usr/local/bin/*)
+            case ":$shell_path:" in
+                *":${program_path%/*}:"*) ;;
+                *) brew_bin=${program_path%/*} ;;
+            esac ;;
+    esac
+done
+if [ -n "$brew_bin" ]; then path_rule="export PATH=\"\$HOME/.local/bin:\$PATH:$brew_bin\""; fi
 add_path() {
     profile=$1
     if ! grep -Fqx "$path_rule" "$profile" 2>/dev/null; then
@@ -39,34 +76,33 @@ add_path() {
             fail 'Cannot update your shell profile.'
     fi
 }
-case ":$PATH:" in
-    *":$bin:"*) ;;
-    *)
-        login_shell=${SHELL:-sh}
-        case "${login_shell##*/}" in
-            zsh) add_path "${ZDOTDIR:-$HOME}/.zshrc" ;;
-            bash)
-                add_path "$HOME/.bashrc"
-                for profile in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
-                    if [ -e "$profile" ] || [ "$profile" = "$HOME/.profile" ]; then
-                        add_path "$profile"
-                        break
-                    fi
-                done ;;
-            fish) "$login_shell" -c 'fish_add_path "$HOME/.local/bin"' 2>/dev/null ||
-                fail 'Add ~/.local/bin to your fish PATH.' ;;
-            sh|dash|ksh|'') add_path "$HOME/.profile" ;;
-            *) printf '%s\n' 'Add ~/.local/bin to your shell PATH.' ;;
-        esac ;;
+case ":$shell_path:" in
+    *":$bin:"*) configure_path=$brew_bin ;;
+    *) configure_path=1 ;;
 esac
+if [ -n "$configure_path" ]; then
+    login_shell=${SHELL:-sh}
+    case "${login_shell##*/}" in
+        zsh) add_path "${ZDOTDIR:-$HOME}/.zshrc" ;;
+        bash)
+            add_path "$HOME/.bashrc"
+            for profile in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+                if [ -e "$profile" ] || [ "$profile" = "$HOME/.profile" ]; then
+                    add_path "$profile"
+                    break
+                fi
+            done ;;
+        fish) if [ -n "$brew_bin" ]; then
+                  "$login_shell" -c "fish_add_path --append $brew_bin" 2>/dev/null || fail 'Cannot add Homebrew to your fish PATH.'
+              fi
+              "$login_shell" -c 'fish_add_path "$HOME/.local/bin"' 2>/dev/null ||
+            fail 'Add ~/.local/bin to your fish PATH.' ;;
+        sh|dash|ksh|'') add_path "$HOME/.profile" ;;
+        *) printf '%s\n' 'Add ~/.local/bin to your shell PATH.' ;;
+    esac
+fi
 
 if [ -n "${WSL_DISTRO_NAME:-}" ]; then
-    # WSLENV exports only the selected distribution name to the Windows installer.
-    windows_installer="$mailbox/copilot-mailbox/install-windows-command.ps1"
-    command -v powershell.exe >/dev/null 2>&1 && [ -r "$windows_installer" ] ||
-        fail 'To use team from Windows, enable WSL interoperability and make powershell.exe available on your PATH.'
-    HARNESS_TEAM_DISTRO="$WSL_DISTRO_NAME" WSLENV="HARNESS_TEAM_DISTRO/w${WSLENV:+:$WSLENV}" \
-        powershell.exe -NoLogo -NoProfile -NonInteractive -Command - < "$windows_installer" >/dev/null 2>&1 ||
-        fail 'Windows could not register team. Check your user PATH for an existing team command.'
+    windows_command
 fi
 printf '%s\n' 'team is installed. Open a new terminal and run team.'

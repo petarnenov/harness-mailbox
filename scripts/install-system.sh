@@ -32,8 +32,17 @@ compose_usable() {
     case "$up_help" in *--wait*) return 0 ;; *) return 1 ;; esac
 }
 
+team_python_usable() {
+    python3 -c 'import curses, fcntl, sys; sys.exit(sys.version_info < (3, 8))' >/dev/null 2>&1
+}
+
+tmux_usable() {
+    tmux -V >/dev/null 2>&1
+}
+
 # A complete working installation is never upgraded or restarted.
-if make --version >/dev/null 2>&1 && "$DOCKER" --version >/dev/null 2>&1 && compose_usable && "$DOCKER" info >/dev/null 2>&1; then
+if make --version >/dev/null 2>&1 && "$DOCKER" --version >/dev/null 2>&1 && compose_usable &&
+   "$DOCKER" info >/dev/null 2>&1 && team_python_usable && tmux_usable; then
     printf 'OK: system dependencies already available; no installation needed.\n'
     exit 0
 fi
@@ -47,7 +56,8 @@ case "$platform" in
                 if [ -x "$candidate" ]; then brew_cmd=$candidate; break; fi
             done
         fi
-        if ! make --version >/dev/null 2>&1 || ! "$DOCKER" --version >/dev/null 2>&1 || ! compose_usable; then
+        if ! make --version >/dev/null 2>&1 || ! "$DOCKER" --version >/dev/null 2>&1 ||
+           ! compose_usable || ! team_python_usable || ! tmux_usable; then
             if [ -z "$brew_cmd" ]; then
                 command -v curl >/dev/null 2>&1 || fail 'macOS curl is unavailable; restore the system curl before bootstrapping Homebrew.'
                 installer_tmp=$(mktemp "${TMPDIR:-/tmp}/mailbox-homebrew.XXXXXX")
@@ -57,6 +67,12 @@ case "$platform" in
                     if [ -x "$candidate" ]; then brew_cmd=$candidate; break; fi
                 done
                 [ -n "$brew_cmd" ] || fail 'Homebrew installed outside a supported prefix; add brew to PATH and rerun setup.'
+            fi
+            if ! team_python_usable; then
+                "$brew_cmd" install python || fail 'Homebrew could not install Python for team. Check Homebrew and rerun make setup.'
+            fi
+            if ! tmux_usable; then
+                "$brew_cmd" install tmux || fail 'Homebrew could not install tmux. Check Homebrew and rerun make setup.'
             fi
             if ! make --version >/dev/null 2>&1; then
                 "$brew_cmd" install make
@@ -79,16 +95,30 @@ case "$platform" in
         fi
         ;;
     Linux)
+        # A distribution without Docker Desktop follows the native Linux installer.
+        if [ -n "${WSL_DISTRO_NAME:-}" ] && ! command -v dockerd >/dev/null 2>&1 &&
+           { command -v docker.exe >/dev/null 2>&1 || [ -d /mnt/wsl/docker-desktop ]; } &&
+           { ! "$DOCKER" --version >/dev/null 2>&1 || ! compose_usable || ! "$DOCKER" info >/dev/null 2>&1; }; then
+            fail 'Docker is unavailable in WSL. Start Docker Desktop on Windows, enable WSL 2 integration for this distribution, then rerun make setup.'
+        fi
         if command -v apt-get >/dev/null 2>&1; then
             package_manager=apt
         elif command -v dnf >/dev/null 2>&1; then
             package_manager=dnf
         else
-            fail 'Automatic Linux bootstrap supports apt-get or dnf. Install Make, curl, Docker Engine and Compose for your distribution, then rerun make setup.'
+            fail 'Automatic Linux bootstrap supports apt-get or dnf. Install Make, curl, Python 3 with curses, tmux, Docker Engine and Compose for your distribution, then rerun make setup.'
         fi
         packages=
         make --version >/dev/null 2>&1 || packages="$packages make"
         command -v curl >/dev/null 2>&1 || packages="$packages curl ca-certificates"
+        if ! team_python_usable; then
+            if [ "$package_manager" = apt ]; then
+                packages="$packages python3 libpython3-stdlib"
+            else
+                packages="$packages python3 python3-libs"
+            fi
+        fi
+        tmux_usable || packages="$packages tmux"
         if [ -n "$packages" ]; then
             if [ "$package_manager" = apt ]; then
                 as_root apt-get update
@@ -138,4 +168,6 @@ until "$DOCKER" info >/dev/null 2>&1; do
 done
 make --version >/dev/null 2>&1 || fail 'Make is not executable. Finish its system installation and rerun setup.'
 compose_usable || fail 'Compose installation is still unavailable/incompatible; check the installer output and rerun make setup.'
+team_python_usable || fail 'The python3 on PATH needs Python 3.8 or newer with curses and fcntl. Check your shell PATH and rerun make setup.'
+tmux_usable || fail 'tmux is not executable on PATH. Check your shell PATH and rerun make setup.'
 printf 'System dependencies are ready.\n'
