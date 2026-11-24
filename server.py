@@ -3,6 +3,7 @@ import json
 import math
 import os
 import re
+import sys
 from collections import Counter
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -230,6 +231,44 @@ def verification_passed(value):
     return verification in ('passed', 'verified', 'pass') and evidence(value)
 
 
+OVERFLOW_WARNING = 'Estimate or measured-hour totals exceed the supported number range; the affected totals are unavailable'
+
+
+def rounded_range(sums):
+    """Rounded low/likely/high sums, or None when any of the three is not finite."""
+    return {k: round(v, 2) for k, v in sums.items()} if all(math.isfinite(v) for v in sums.values()) else None
+
+
+def within_float_range(hours):
+    """Exact for integers of any size, unlike math.isfinite, which converts them to float."""
+    return abs(hours) <= sys.float_info.max
+
+
+def rounded_hours_total(hours):
+    """Rounded sum of measured hours, or None when the sum is beyond the float range."""
+    try:
+        total = sum(hours)
+    except OverflowError:
+        # An exact integer running total beyond the float range met a decimal; every value is >= 0, so the sum is beyond the range.
+        return None
+    return round(total, 2) if within_float_range(total) else None
+
+
+def has_overflowed_total(progress):
+    return ((progress['known_issues'] > 0 and (progress['estimate'] is None or progress['remaining_estimate'] is None))
+            or (progress['measured_issues'] > 0 and progress['actual_machine_hours'] is None))
+
+
+def has_overflowed_allocation(project):
+    return bool(project['issue_keys']) and project['allocated_estimate'] is None
+
+
+def has_overflowed_totals(totals, epics, projects):
+    return (has_overflowed_total(totals)
+            or any(has_overflowed_total(e['progress']) for e in epics)
+            or any(has_overflowed_total(p['progress']) or has_overflowed_allocation(p) for p in projects))
+
+
 def metrics(issues, complete, model):
     counts = Counter(i['local_status'] for i in issues)
     total = len(issues)
@@ -247,11 +286,11 @@ def metrics(issues, complete, model):
             actuals.append(issue['actual_machine_hours'])
     return {'known_issues': total, 'verified_issues': verified, 'status_counts': dict(counts),
             'scope_complete': complete, 'percent': round(100 * verified / total, 1) if complete and total else None,
-            'estimate': {k: round(v, 2) for k, v in totals.items()} if total else None,
-            'remaining_estimate': {k: round(v, 2) for k, v in remaining.items()} if total else None,
+            'estimate': rounded_range(totals) if total else None,
+            'remaining_estimate': rounded_range(remaining) if total else None,
             'estimate_basis': 'Complete enumerated issue scope' if complete and total else 'Known issue subset only; full estimate unavailable',
             'explicit_estimates': sum(i['estimate'] is not None for i in issues),
-            'actual_machine_hours': round(sum(actuals), 2) if actuals else None, 'measured_issues': len(actuals)}
+            'actual_machine_hours': rounded_hours_total(actuals) if actuals else None, 'measured_issues': len(actuals)}
 
 
 def build_dashboard(root, model=None, mode='live'):
@@ -505,11 +544,14 @@ def build_dashboard(root, model=None, mode='live'):
             estimate = i['estimate'] or {k: model[k] * model['review_multiplier'] for k in allocated}
             for k in allocated:
                 allocated[k] += estimate[k] / len(i['projects'])
-        p['allocated_estimate'] = {k: round(v, 2) for k, v in allocated.items()} if selected else None
+        p['allocated_estimate'] = rounded_range(allocated) if selected else None
     dependencies = [{'from': dep, 'to': i['key'], 'kind': 'depends_on', 'unresolved': dep not in issues}
                     for i in issue_list for dep in i['dependencies']]
     graph = build_graph(root, list(projects.values()), epics, issue_list, tasks, raw_issues, external, read_json, warnings)
     project_delivery(issue_list, tasks, raw_issues, graph, delivery_warnings)
+    totals = metrics(issue_list, complete, model)
+    if has_overflowed_totals(totals, epics, projects.values()):
+        delivery_warnings.append(OVERFLOW_WARNING)
     return {'generated_at': datetime.now(timezone.utc).isoformat(), 'mode': mode, 'warnings': warnings,
             'delivery_warnings': delivery_warnings,
             'projects': sorted(projects.values(), key=lambda p: p['name']), 'epics': epics, 'issues': issue_list,
@@ -517,7 +559,7 @@ def build_dashboard(root, model=None, mode='live'):
             'graph': graph,
             'task_dependencies': [{'from': dep, 'to': t['id'], 'kind': 'task_dependency', 'unresolved': dep not in task_map} for t in tasks for dep in t['depends_on']],
             'reported_statistics': reported, 'worked_measured_at': worked['measured_at'],
-            'totals': metrics(issue_list, complete, model), 'estimate_method': model}
+            'totals': totals, 'estimate_method': model}
 
 
 MODEL_RANGE_MESSAGE = 'Model requires 0 ≤ low ≤ likely ≤ high ≤ 1000 and 1 ≤ review multiplier ≤ 1000'

@@ -42,6 +42,7 @@ One row per completed run. Numbers come from the run log, never from estimates.
 | 2026-11-23 | multi-project.md | MEDIUM | 2026-11-23.1 | 5 | 0 | 0 | 0 | 0 | unavailable | unavailable | 0 / 0 / 0 / 0 | 0 |
 | 2026-11-23 | inbound.md | HIGH | 2026-11-23.1 | 3 | 1 | 1 | 1 | 0 | 336429 | 327s | 0 / 0 / 0 / 0 | 1 |
 | 2026-11-23 | `source-review.md` | HIGH | da.loop@2026-11-23.1 | 67, max parallel 6 peers | 42 | 0 | rounds 1-3 BLOCK, round 4 clear | 0 | unavailable | 4631s | 1 / 1 / 0 / 0 | 3 |
+| 2026-11-24 | `metrics-overflow-and-orchestrator-docs.md` | HIGH | da.loop@2026-11-23.1 | 13, no parallel peers | 1 | 0 | rounds 1-2 BLOCK, round 3 clear | 0 | unavailable | 2581s | 1 / 0 / 0 / 0 | 2 |
 
 ## Lessons
 
@@ -50,3 +51,4 @@ Status values and automatic write-back rules are defined by the target's adapted
 | id | status | seen | signal | mechanism | evidence | target | rule |
 |---|---|---|---|---|---|---|---|
 | K01 | applied@2026-11-23 (review=b5366a385ea7717946294ea5fd376ede51d6dc126db0ffef89a4ed06ca023316) | 1 | a change review finds the shape check a fix added at one read of a reply or record missing at sibling reads of the same data | the fix follows the cited line, not the root cause | `.claude/goal-runs/source-review.md`: R2-S3-F7 with four sibling reads, R3-S3-F4, R3-S3-F5 | conventions §K6 (P2) | When a fix adds a shape or type check to one read of an external reply or stored record, apply the same check to every other read of that reply or record in the touched module under the same accepted criterion, and report any read outside that scope as an open finding. |
+| K02 | rejected (lesson reviewer: target tests §T2 is outside automatic write-back; owner: user) | 1 | a change review finds twice that a fix of arithmetic over record numbers fails for whole-number values, because tests and fix used only decimal values | Python keeps whole-number sums exact and raises when converting a large one to a float, so whole numbers take a different path than decimals | `.claude/goal-runs/metrics-overflow-and-orchestrator-docs.md`: R1-B1, R2-B1 | tests §T2 (P2) | When code computes over numbers read from a record, test every numeric form the guarded reader accepts — whole-number literals, decimal literals, and both mixed in each order — because whole numbers take a different arithmetic path than decimals. |

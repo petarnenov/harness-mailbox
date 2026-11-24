@@ -12,6 +12,11 @@ import server
 
 
 MODEL = {'low': 1, 'likely': 2, 'high': 4, 'review_multiplier': 1.5}
+HUGE = 1e308
+HUGE_RANGE = {'low': HUGE, 'likely': HUGE, 'high': HUGE}
+SMALL_RANGE = {'low': 1, 'likely': 2, 'high': 3}
+SMALL_RANGE_FLOATS = {'low': 1.0, 'likely': 2.0, 'high': 3.0}
+OVERFLOW_WARNING = 'Estimate or measured-hour totals exceed the supported number range; the affected totals are unavailable'
 CSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'"
 MODEL_RANGE_MESSAGE = 'Model requires 0 ≤ low ≤ likely ≤ high ≤ 1000 and 1 ≤ review multiplier ≤ 1000'
 
@@ -600,6 +605,172 @@ class HandlerTests(Fixture):
                     status, body, _ = self.get('/api/dashboard?' + query)
                     self.assertEqual(400, status)
                     self.assertEqual({'error': {'code': 'invalid_request', 'message': MODEL_RANGE_MESSAGE}}, json.loads(body))
+
+    def served_dashboard(self):
+        with patch.dict(os.environ, {'MAILBOX_ROOT': str(self.root)}):
+            status, body, _ = self.get('/api/dashboard')
+        self.assertEqual(200, status)
+        return json.loads(body)
+
+    def huge_issue(self, key, **extra):
+        return {'key': key, 'agent_estimate_hours': HUGE_RANGE, **extra}
+
+    def verified_huge_issue(self, key, **extra):
+        return self.huge_issue(key, local_status='verified_done', verification='passed', evidence=['x'], **extra)
+
+    def assertOverflowWarningOnce(self, data):
+        self.assertEqual([OVERFLOW_WARNING], [w for w in data['delivery_warnings'] if w == OVERFLOW_WARNING])
+        self.assertNotIn(OVERFLOW_WARNING, data['warnings'])
+
+    def assertNoOverflowWarning(self, data):
+        self.assertNotIn(OVERFLOW_WARNING, data['delivery_warnings'])
+        self.assertNotIn(OVERFLOW_WARNING, data['warnings'])
+
+    def test_estimates_summing_beyond_the_float_range_are_served_as_null_with_one_delivery_warning(self):
+        self.epic('E', ['A-1', 'A-2'], True, [self.huge_issue('A-1'), self.huge_issue('A-2')])
+        data = self.served_dashboard()
+        self.assertIsNone(data['totals']['estimate'])
+        self.assertOverflowWarningOnce(data)
+
+    def test_measured_hours_summing_beyond_the_float_range_leave_the_estimates_as_numbers(self):
+        self.epic('E', ['A-1', 'A-2'], True, [
+            {'key': 'A-1', 'agent_estimate_hours': SMALL_RANGE, 'actual_machine_hours': HUGE},
+            {'key': 'A-2', 'agent_estimate_hours': SMALL_RANGE, 'actual_machine_hours': HUGE}])
+        data = self.served_dashboard()
+        totals = data['totals']
+        self.assertIsNone(totals['actual_machine_hours'])
+        self.assertEqual(2, totals['measured_issues'])
+        self.assertEqual({'low': 2.0, 'likely': 4.0, 'high': 6.0}, totals['estimate'])
+        self.assertEqual({'low': 2.0, 'likely': 4.0, 'high': 6.0}, totals['remaining_estimate'])
+        self.assertOverflowWarningOnce(data)
+
+    def test_overflowing_estimate_is_null_while_the_remaining_estimate_stays_finite(self):
+        self.epic('E', ['A-1', 'A-2', 'A-3'], True, [
+            self.verified_huge_issue('A-1'), self.verified_huge_issue('A-2'),
+            {'key': 'A-3', 'agent_estimate_hours': SMALL_RANGE}])
+        data = self.served_dashboard()
+        self.assertIsNone(data['totals']['estimate'])
+        self.assertEqual(SMALL_RANGE_FLOATS, data['totals']['remaining_estimate'])
+        self.assertOverflowWarningOnce(data)
+
+    def test_project_progress_estimate_is_null_while_its_allocated_estimate_stays_finite(self):
+        self.epic('E', ['A-1', 'A-2'], True, [self.huge_issue('A-1', projects=['a', 'b']),
+                                              self.huge_issue('A-2', projects=['a', 'b'])])
+        data = self.served_dashboard()
+        project = next(p for p in data['projects'] if p['id'] == 'a')
+        self.assertIsNone(project['progress']['estimate'])
+        self.assertEqual(HUGE_RANGE, project['allocated_estimate'])
+        self.assertOverflowWarningOnce(data)
+
+    def test_project_allocation_beyond_the_float_range_is_null(self):
+        self.epic('E', ['A-1', 'A-2'], True, [self.huge_issue('A-1', projects=['a']), self.huge_issue('A-2', projects=['a'])])
+        self.epic('F', ['B-1'], True, [{'key': 'B-1', 'agent_estimate_hours': SMALL_RANGE, 'projects': ['b']}])
+        data = self.served_dashboard()
+        projects = {p['id']: p for p in data['projects']}
+        self.assertIsNone(projects['a']['allocated_estimate'])
+        self.assertEqual(SMALL_RANGE_FLOATS, projects['b']['allocated_estimate'])
+        self.assertOverflowWarningOnce(data)
+
+    def test_a_range_is_null_as_a_whole_when_only_one_of_its_keys_overflows(self):
+        high_only = {'low': 1, 'likely': 2, 'high': HUGE}
+        self.epic('E', ['A-1', 'A-2'], True, [{'key': 'A-1', 'agent_estimate_hours': high_only},
+                                              {'key': 'A-2', 'agent_estimate_hours': high_only}])
+        data = self.served_dashboard()
+        self.assertIsNone(data['totals']['estimate'])
+        self.assertIsNone(data['totals']['remaining_estimate'])
+        self.assertOverflowWarningOnce(data)
+
+    def test_epic_progress_nulls_only_the_epic_whose_sums_overflow(self):
+        self.epic('E1', ['A-1', 'A-2'], True, [self.huge_issue('A-1'), self.huge_issue('A-2')])
+        self.epic('E2', ['B-1'], True, [{'key': 'B-1', 'agent_estimate_hours': SMALL_RANGE, 'actual_machine_hours': 1}])
+        data = self.served_dashboard()
+        epics = {e['key']: e['progress'] for e in data['epics']}
+        self.assertIsNone(epics['E1']['estimate'])
+        self.assertIsNone(epics['E1']['remaining_estimate'])
+        self.assertEqual(SMALL_RANGE_FLOATS, epics['E2']['estimate'])
+        self.assertEqual(1.0, epics['E2']['actual_machine_hours'])
+        self.assertOverflowWarningOnce(data)
+
+    def test_the_warning_appears_once_when_totals_epics_and_projects_all_overflow(self):
+        self.epic('E1', ['A-1', 'A-2'], True, [self.huge_issue('A-1', projects=['a'], actual_machine_hours=HUGE),
+                                               self.huge_issue('A-2', projects=['a'], actual_machine_hours=HUGE)])
+        self.epic('E2', ['B-1', 'B-2'], True, [self.huge_issue('B-1', projects=['b']), self.huge_issue('B-2', projects=['b'])])
+        self.assertOverflowWarningOnce(self.served_dashboard())
+
+    def test_counts_beside_null_totals_are_unchanged(self):
+        self.epic('E', ['A-1', 'A-2'], True, [self.verified_huge_issue('A-1', actual_machine_hours=HUGE),
+                                              self.huge_issue('A-2', actual_machine_hours=HUGE)])
+        totals = self.served_dashboard()['totals']
+        self.assertEqual(2, totals['known_issues'])
+        self.assertEqual(1, totals['verified_issues'])
+        self.assertEqual(2, totals['explicit_estimates'])
+        self.assertEqual(2, totals['measured_issues'])
+        self.assertEqual('Complete enumerated issue scope', totals['estimate_basis'])
+        self.assertEqual(50.0, totals['percent'])
+        self.assertEqual({'verified_done': 1, 'pending': 1}, totals['status_counts'])
+
+    def test_whole_number_measured_hours_summing_beyond_the_float_range_are_served_as_null(self):
+        whole_number_hours = 10 ** 308
+        self.epic('E', ['A-1', 'A-2'], True, [{'key': 'A-1', 'actual_machine_hours': whole_number_hours},
+                                              {'key': 'A-2', 'actual_machine_hours': whole_number_hours}])
+        self.assertIn('1' + '0' * 308, (self.root / 'epics' / 'E' / 'issues.json').read_text())
+        data = self.served_dashboard()
+        self.assertIsNone(data['totals']['actual_machine_hours'])
+        self.assertEqual(2, data['totals']['measured_issues'])
+        self.assertOverflowWarningOnce(data)
+
+    def test_decimal_measured_hours_beside_overflowing_whole_numbers_are_null_in_any_order(self):
+        hours = [10 ** 308, 10 ** 308, 1.5]
+        for decimal_position in range(len(hours)):
+            arrangement = hours[:]
+            arrangement.insert(decimal_position, arrangement.pop())
+            with self.subTest(decimal_position=decimal_position):
+                keys = [f'A-{n}' for n in range(len(arrangement))]
+                self.epic('E', keys, True, [{'key': key, 'actual_machine_hours': value}
+                                            for key, value in zip(keys, arrangement)])
+                data = self.served_dashboard()
+                self.assertIsNone(data['totals']['actual_machine_hours'])
+                self.assertEqual(3, data['totals']['measured_issues'])
+                self.assertOverflowWarningOnce(data)
+
+    def test_whole_number_and_decimal_measured_hours_still_sum_to_their_finite_total(self):
+        self.epic('E', ['A-1', 'A-2'], True, [{'key': 'A-1', 'actual_machine_hours': 3},
+                                              {'key': 'A-2', 'actual_machine_hours': 1.5}])
+        data = self.served_dashboard()
+        self.assertEqual(4.5, data['totals']['actual_machine_hours'])
+        self.assertNoOverflowWarning(data)
+
+    def test_small_whole_number_measured_hours_are_summed_without_the_overflow_warning(self):
+        self.epic('E', ['A-1', 'A-2'], True, [{'key': 'A-1', 'actual_machine_hours': 3},
+                                              {'key': 'A-2', 'actual_machine_hours': 5}])
+        data = self.served_dashboard()
+        self.assertEqual(8, data['totals']['actual_machine_hours'])
+        self.assertNoOverflowWarning(data)
+
+    def test_finite_sums_are_served_unchanged_without_the_overflow_warning(self):
+        self.epic('E', ['A-1', 'A-2'], True, [
+            {'key': 'A-1', 'agent_estimate_hours': SMALL_RANGE, 'actual_machine_hours': 1.5},
+            {'key': 'A-2', 'agent_estimate_hours': SMALL_RANGE, 'actual_machine_hours': 2}])
+        data = self.served_dashboard()
+        self.assertEqual({'low': 2.0, 'likely': 4.0, 'high': 6.0}, data['totals']['estimate'])
+        self.assertEqual(3.5, data['totals']['actual_machine_hours'])
+        self.assertNoOverflowWarning(data)
+
+    def test_empty_selection_and_missing_measurement_are_null_without_the_overflow_warning(self):
+        self.epic('E', [], True, [])
+        self.epic('F', ['A-1'], True, [{'key': 'A-1', 'agent_estimate_hours': SMALL_RANGE}])
+        data = self.served_dashboard()
+        empty = next(e for e in data['epics'] if e['key'] == 'E')['progress']
+        self.assertIsNone(empty['estimate'])
+        self.assertIsNone(empty['actual_machine_hours'])
+        self.assertIsNone(data['totals']['actual_machine_hours'])
+        self.assertNoOverflowWarning(data)
+
+    def test_no_issues_at_all_gives_null_totals_without_the_overflow_warning(self):
+        data = self.served_dashboard()
+        self.assertIsNone(data['totals']['estimate'])
+        self.assertIsNone(data['totals']['actual_machine_hours'])
+        self.assertNoOverflowWarning(data)
 
     def test_unknown_mode_is_an_invalid_request(self):
         status, body, _ = self.get('/api/dashboard?mode=wat')

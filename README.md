@@ -312,7 +312,7 @@ Issue records may provide an explicit `delivery` object. Supported fields includ
 
 The projection also preserves existing `baseline_status`, `baseline_assessment`, `acceptance_criteria` and explicit ownership/verification timestamps. Source metadata conflicts remain visible instead of selecting the most advanced claim. Producers should record actual outcomes and artifact references in their owned coordination records; the dashboard does not invent or write those records.
 
-Process-data conflicts, and read failures of `deliveries/<task>.json` or `jira-sync/worked-so-far.json`, are returned in `delivery_warnings`, separately from authoritative graph warnings; they do not grant or remove dispatch eligibility. Changes to the display helper still invalidate old dispatch receipts through the code fingerprint.
+Process-data conflicts, and read failures of `deliveries/<task>.json` or `jira-sync/worked-so-far.json`, are returned in `delivery_warnings`, separately from authoritative graph warnings; they do not grant or remove dispatch eligibility. Changes to the display helper still invalidate old dispatch receipts through the code fingerprint. A total whose individually valid values sum beyond the floating-point range is returned as `null`: `estimate`, `remaining_estimate` and `actual_machine_hours` of `totals` and of each Epic and project `progress`, and a project's `allocated_estimate`. A low/likely/high range is `null` as a whole when any of its three sums overflows, and each field is decided on its own. `delivery_warnings` then carries `Estimate or measured-hour totals exceed the supported number range; the affected totals are unavailable` once per response.
 
 
 ### Ownership roles

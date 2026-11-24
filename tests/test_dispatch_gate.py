@@ -153,6 +153,16 @@ class DispatchGateTests(unittest.TestCase):
             'UNKNOWN-DIRECTION'])
         self.assertTrue(self.evaluate()['allowed'])
 
+    def test_overflowing_estimate_sums_in_the_mailbox_do_not_change_an_allowed_result(self):
+        before = self.evaluate()
+        huge = {'low': 1e308, 'likely': 1e308, 'high': 1e308}
+        self.epic([{'key': 'A', 'projects': ['p'], 'agent_estimate_hours': huge},
+                   {'key': 'B', 'agent_estimate_hours': huge}])
+        after = self.evaluate()
+        self.assertTrue(after['allowed'], after)
+        self.assertEqual((before['allowed'], before['reasons'], before['prerequisites']),
+                         (after['allowed'], after['reasons'], after['prerequisites']))
+
     def test_cycles_block_even_if_all_dependency_completion_is_recorded(self):
         first, second = str(uuid.uuid4()), str(uuid.uuid4())
         self.task(first, status='done', evidence=['proof'], depends_on=[second])
