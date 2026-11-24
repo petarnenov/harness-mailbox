@@ -59,7 +59,10 @@ if [ "$check" = 1 ]; then
     exit 0
 fi
 mkdir -p "$bin" 2>/dev/null || fail 'Cannot access your local bin directory.'
-if [ -e "$link" ] || [ -L "$link" ]; then
+# A link whose target is gone (a moved or removed checkout) holds no command, so replacing it loses nothing.
+if [ -L "$link" ] && [ ! -e "$link" ]; then
+    ln -sfn "$launcher" "$link" 2>/dev/null || fail 'Cannot replace the broken team symlink.'
+elif [ -e "$link" ] || [ -L "$link" ]; then
     [ "$link" -ef "$launcher" ] || fail 'The path ~/.local/bin/team is already in use.'
 else
     ln -s "$launcher" "$link" 2>/dev/null || fail 'Cannot create the symlink for team.'
