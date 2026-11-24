@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import shlex
 import stat
 import subprocess
 import tempfile
@@ -63,6 +64,23 @@ def tmux_client(socket):
     return ["tmux", "-S", socket] if socket else ["tmux"]
 
 
+def legacy_status_command(socket, pane):
+    # Older teams have the original launch arguments in tmux but no harness label.
+    stock = "#{||:#{==:#{status-left},#{l:[#{session_name}] }},#{==:#{status-left},#{l:[#S] }}}"
+    try:
+        probe = subprocess.run([*tmux_client(socket), "display-message", "-p", "-t", pane,
+                                "#{?" + stock + ",#{pane_start_command},}"],
+                               check=True, capture_output=True, text=True, timeout=2)
+        args = shlex.split(probe.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+    if (args[1:4] == ["--launch-pane", "orchestrator", "--harness"] and len(args) >= 5
+            and args[4] in ("copilot", "claude", "codex")):
+        label = args[4].capitalize()
+        return f"if-shell -F -t {pane} '{stock}' {{ set-option -t {pane} status-left '[{label}] ' }} ; "
+    return ""
+
+
 def attach(socket, pane, identity, *, focus_only=False):
     """Check the observed coordinator in the same tmux client that changes focus."""
     fields = identity.split("|")
@@ -74,8 +92,8 @@ def attach(socket, pane, identity, *, focus_only=False):
             or (pinned and pinned != pid)):
         raise ValueError("The team connection changed. Reopen team to refresh its status.")
     condition = "#{==:" + IDENTITY + "," + identity + "}"
-    # if-shell parses its command body. Only the validated numeric tmux IDs enter it.
-    commands = f"select-window -t {pane} ; select-pane -t {pane}"
+    # Recheck ownership before altering the session label or changing focus.
+    commands = legacy_status_command(socket, pane) + f"select-window -t {pane} ; select-pane -t {pane}"
     changed = "The team connection changed. Reopen team to refresh its status."
     client = [*tmux_client(socket), "if-shell", "-F", "-t", pane, condition]
     rejected = "display-message -p '" + changed + "'"

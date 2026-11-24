@@ -44,6 +44,7 @@ One row per completed run. Numbers come from the run log, never from estimates.
 | 2026-11-23 | `source-review.md` | HIGH | da.loop@2026-11-23.1 | 67, max parallel 6 peers | 42 | 0 | rounds 1-3 BLOCK, round 4 clear | 0 | unavailable | 4631s | 1 / 1 / 0 / 0 | 3 |
 | 2026-11-24 | `metrics-overflow-and-orchestrator-docs.md` | HIGH | da.loop@2026-11-23.1 | 13, no parallel peers | 1 | 0 | rounds 1-2 BLOCK, round 3 clear | 0 | unavailable | 2581s | 1 / 0 / 0 / 0 | 2 |
 | 2026-11-24 | `private-mailbox.md` | HIGH | da.loop@2026-11-23.1 | 2, max parallel 2 | 2 | 0 | final review clear after one correction round | 1 | unavailable | 841s | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-24 | `orchestrator-bar.md` | MEDIUM | da.loop@2026-11-23.1 | 4, max parallel 2 | 1 | 0 | reconnect fixed | 0 | unavailable | unavailable | 0 / 0 / 0 / 0 | 0 |
 
 ## Lessons
 

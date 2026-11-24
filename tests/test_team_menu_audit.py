@@ -55,9 +55,11 @@ class TeamMenuAuditTests(unittest.TestCase):
     def test_reconnect_focuses_the_coordinator_pane_in_a_split_window(self):
         active = snapshot('project')
         with (patch.object(self.data, 'managed_team', return_value=active),
-              patch('subprocess.run') as tmux, patch('os.execvp') as attach):
+              patch('subprocess.run', return_value=subprocess.CompletedProcess([], 0, '')) as tmux,
+              patch('os.execvp') as attach):
             self.data.reconnect(WORKSPACE, active)
-        tmux.assert_not_called()
+        tmux.assert_called_once()
+        self.assertIn('display-message', tmux.call_args.args[0])
         attach.assert_called_once()
         command = attach.call_args.args[1]
         self.assertIn('if-shell', command)

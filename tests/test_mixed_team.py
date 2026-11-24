@@ -395,6 +395,22 @@ class ManagedTeamTests(unittest.TestCase):
         self.assertIn(snapshot['identities']['%22'], one[one.index('%22') + 1])
         self.assertNotIn('kill-session', whole)
 
+    def test_reconnect_uses_only_a_recognized_coordinator_launch_for_the_label(self):
+        identity = self.control.managed_team(self.root)['identities']['%20']
+        launch = "'/mailbox with spaces/team' --launch-pane orchestrator --harness "
+        cases = [(launch + h, '[' + h.capitalize() + ']') for h in ('copilot', 'claude', 'codex')]
+        cases.extend([(launch + 'other', None), (launch.replace('orchestrator', 'worker') + 'codex', None),
+                      ("unclosed 'quote", None), ('', None)])
+        for self.result, label in cases:
+            with self.subTest(response=self.result), patch('os.execvp') as connect:
+                self.control.attach(None, '%20', identity)
+                commands = connect.call_args.args[1][-2]
+                self.assertIn('select-pane -t %20', commands)
+                if label:
+                    self.assertIn(label, commands)
+                else:
+                    self.assertNotIn('set-option', commands)
+
     def test_stopping_only_second_worker_keeps_first_worker_and_coordinator(self):
         self.rows.append(self.row('%24', 'alpha+2', '904'))
         self.rows = [row.replace('|alpha,beta|', '|alpha,alpha+2,beta|') for row in self.rows]

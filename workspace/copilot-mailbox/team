@@ -162,6 +162,9 @@ def create_team(root, launcher, name, projects, slots, orchestrator, workers):
     coordinator, _, socket = initial.partition(" ")
     target = "=" + temporary
     try:
+        status_left = tmux("show-options", "-Av", "-t", target + ":", "status-left").stdout
+        if status_left in ("[#{session_name}] \n", "[#S] \n"):
+            tmux("set-option", "-t", target + ":", "status-left", f"[{orchestrator.harness.capitalize()}] ")
         expected = {coordinator: "orchestrator"}
         wait_for_members(temporary, expected)
         for slot, (project, number) in slots.items():

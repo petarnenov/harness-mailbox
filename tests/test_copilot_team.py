@@ -116,12 +116,19 @@ class CopilotTeamTests(unittest.TestCase):
                     '--orchestrator-effort', 'high', '--worker-harness', worker,
                     '--worker-model', 'builder', '--worker-effort', 'low')
                 self.assertEqual(status, 0, error)
+                self.assertEqual(self.server.status_left.strip(), f'[{orchestrator.capitalize()}]')
                 commands = [c for c in self.server.calls if c[0] in ('new-session', 'new-window')]
                 self.assertEqual(len(commands), 3)
                 for pane in commands:
                     expected = (orchestrator, 'planner', 'high') if pane[0] == 'new-session' else (worker, 'builder', 'low')
                     self.assertEqual(tuple(pane[pane.index(flag) + 1] for flag in
                                            ('--harness', '--model', '--reasoning-effort')), expected)
+
+    def test_custom_status_left_is_preserved_on_startup(self):
+        self.server.status_left = '#W • #S'
+        status, errors, _ = self.invoke('alpha', '--orchestrator-harness', 'codex')
+        self.assertEqual(status, 0, errors)
+        self.assertEqual(self.server.status_left, '#W • #S')
 
     def test_default_native_models_require_only_selected_executables_at_creation(self):
         args = ('alpha', '--orchestrator-harness', 'claude', '--worker-harness', 'codex')
@@ -353,6 +360,7 @@ class TmuxDouble:
         self.calls = []
         self.projects = None
         self.staged = None
+        self.status_left = '[#{session_name}] '
         self.fail_on = None
         self.coordinator_starts = True
         self.panes = {}
@@ -395,9 +403,13 @@ class TmuxDouble:
         elif command == 'has-session':
             code = int(self.owner is None and self.projects is None)
         elif command == 'show-options':
-            stdout = (self.projects or '') + '\n'
+            value = self.status_left if args[-1] == 'status-left' else self.projects
+            stdout = (value or '') + '\n'
         elif command == 'set-option':
-            self.staged = args[-1]
+            if args[-2] == 'status-left':
+                self.status_left = args[-1]
+            elif args[-2] == '@copilot_projects':
+                self.staged = args[-1]
         elif command == 'rename-session':
             self.projects = self.staged
         elif command == 'kill-session':

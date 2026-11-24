@@ -135,7 +135,32 @@ class RuntimeAuditTests(unittest.TestCase):
                     yield command
                 finally:
                     for server in ('default', 'fixture-other'):
-                        command('-L', server, 'kill-server', check=False)
+                        socket = Path(sockets) / ('tmux-' + str(os.getuid())) / server
+                        command('-S', str(socket), 'kill-server', check=False)
+
+    @unittest.skipUnless(shutil.which('tmux'), 'requires tmux')
+    def test_team_status_left_shows_coordinator_harness_and_respects_custom_format(self):
+        api = runpy.run_path(str(self.plugin / 'team'))
+        settings = api['RoleSettings']
+        for harness in ('copilot', 'claude', 'codex'):
+            provider = self.base / harness
+            provider.write_text('#!/bin/sh\nexec sleep 120\n')
+            provider.chmod(0o755)
+        cases = [('codex', 'copilot', None, '[Codex]'), ('claude', 'codex', None, '[Claude]'),
+                 ('copilot', 'claude', None, '[Copilot]'), ('codex', 'claude', '[#S] ', '[Codex]'),
+                 ('codex', 'claude', 'my #W', 'my orchestrator')]
+        for leader, worker, custom, expected in cases:
+            with self.subTest(leader=leader, custom=custom), self.isolated_tmux() as tmux:
+                tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'unrelated', '-n', 'idle', 'sleep', '120')
+                if custom:
+                    tmux('set-option', '-g', 'status-left', custom)
+                name = api['setup_team'](self.root, ['app'], settings(leader, None, None),
+                                         settings(worker, None, None))
+                rendered = tmux('display-message', '-p', '-t', '=' + name + ':orchestrator',
+                                '#{T:status-left}').stdout.strip()
+                self.assertEqual(rendered, expected)
+                other = tmux('display-message', '-p', '-t', '=unrelated:', '#{T:status-left}').stdout.strip()
+                self.assertEqual(other, 'my idle' if custom == 'my #W' else '[unrelated]')
 
     @unittest.skipUnless(shutil.which('tmux'), 'requires tmux')
     def test_fresh_roles_use_callers_provider_profile_with_an_older_tmux_server(self):
@@ -245,15 +270,22 @@ class RuntimeAuditTests(unittest.TestCase):
             os.environ['TMUX'] = tmux('-L', 'fixture-other', 'display-message', '-p',
                                       '#{socket_path},#{pid},0').stdout.strip()
             (self.base / 'copilot').write_text('#!/bin/sh\nexec sleep 120\n')
+            shutil.copy2(self.base / 'copilot', self.base / 'codex')
             api = runpy.run_path(str(self.plugin / 'team'))
-            role = api['RoleSettings']('copilot', 'auto', None)
-            name = api['setup_team'](self.root, ['app'], role, role)
+            role = api['RoleSettings']
+            name = api['setup_team'](self.root, ['app'], role('codex', None, None), role('copilot', 'auto', None))
             del os.environ['TMUX']
             data = runpy.run_path(str(self.plugin / 'team_ui_data.py'))
             current = data['managed_team'](self.root)
             self.assertIsNotNone(current)
             self.assertEqual(set(current['panes']), {'orchestrator', 'app'})
             socket_path = tmux('-L', 'fixture-other', 'display-message', '-p', '#{socket_path}').stdout.strip()
+            target = '=' + name + ':orchestrator'
+            def label():
+                return tmux('-S', socket_path, 'display-message', '-p', '-t', target, '#{T:status-left}').stdout.strip()
+            # Teams created before the label fix inherit the session-name format.
+            tmux('-S', socket_path, 'set-option', '-u', '-t', target, 'status-left')
+            self.assertEqual(label(), '[' + name + ']')
             def confirm_target(program, args):
                 with self.terminal_client(args) as pid:
                     self.assertEqual(self.client_session(tmux, socket_path, pid), name)
@@ -261,10 +293,13 @@ class RuntimeAuditTests(unittest.TestCase):
             with patch('os.execvp', side_effect=confirm_target) as attach:
                 data['reconnect'](self.root, current)
             attach.assert_called_once()
+            self.assertEqual(label(), '[Codex]')
+            tmux('-S', socket_path, 'set-option', '-t', target, 'status-left', 'custom #W')
             legacy = data['active_team'](self.root)
             with patch('os.execvp', side_effect=confirm_target) as attach:
                 data['reconnect'](self.root, legacy)
             attach.assert_called_once()
+            self.assertEqual(label(), 'custom orchestrator')
             unrelated = tmux('-S', socket_path, 'display-message', '-p', '-t', '=unrelated:',
                              '#{pid}|#{pane_id}').stdout.strip().split('|')
             with self.terminal_client(['tmux', '-S', socket_path, 'attach-session', '-t', '=unrelated']) as pid:
