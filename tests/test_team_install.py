@@ -129,6 +129,23 @@ class TeamInstallTests(unittest.TestCase):
         self.assertEqual(self.link.read_text(), "existing local command\n")
         self.assertEqual(profile.read_text(), "# keep\n")
 
+    def test_broken_symlink_from_a_removed_checkout_is_replaced(self):
+        self.link.parent.mkdir(parents=True)
+        self.link.symlink_to(self.home / "removed checkout" / "team")
+        result = self.shell(self.script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.link.samefile(self.mailbox / "team"))
+
+    def test_symlink_to_another_existing_command_is_preserved(self):
+        other = self.home / "other-team"
+        other.write_text("another command\n")
+        self.link.parent.mkdir(parents=True)
+        self.link.symlink_to(other)
+        result = self.shell(self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already in use", result.stderr)
+        self.assertEqual(os.readlink(self.link), str(other))
+
     def test_missing_or_non_executable_participant_launcher_fails_before_install(self):
         for name in ("team", "start"):
             with self.subTest(name=name):
