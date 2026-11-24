@@ -1,6 +1,7 @@
 services:
   dashboard:
     build: .
+    user: "${DASHBOARD_USER:-65534:65534}"
     labels:
       io.harness-mailbox.root: ${MAILBOX_ROOT:?Set MAILBOX_ROOT to an existing mailbox data directory}
     ports:

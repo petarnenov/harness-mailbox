@@ -9,6 +9,9 @@ PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/R
 export PATH
 DOCKER=${DOCKER:-docker}
 PROJECT_NAME=${PROJECT_NAME:-mailbox-dashboard}
+# Normal startup selects the reader from the mounted mailbox, never the caller's environment.
+DASHBOARD_USER=65534:65534
+export DASHBOARD_USER
 NODE_IMAGE=${NODE_IMAGE:-node:22-alpine}
 TOOLS_IMAGE="${PROJECT_NAME}-tools:local"
 SCRIPT_TESTS=workspace/.agents/skills/mailbox-orchestrator/scripts
@@ -32,7 +35,12 @@ dashboard_state() {
             mount=$("$DOCKER" inspect --format '{{with index .Config.Labels "io.harness-mailbox.root"}}{{.}}{{else}}{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}{{end}}' "$container") || return 1
             [ "$mount" -ef "$team_root" ] || fail 'The dashboard is configured for another mailbox.'
         fi
-        printf '%s\n' "${state_and_owner%% *}"
+        actual_user=$("$DOCKER" inspect --format '{{.Config.User}}' "$container" 2>/dev/null) || fail 'Cannot verify the dashboard reader identity.'
+        if [ "$actual_user" != "$DASHBOARD_USER" ]; then
+            printf '%s\n' 'replace-reader'
+        else
+            printf '%s\n' "${state_and_owner%% *}"
+        fi
     fi
 }
 
@@ -62,6 +70,34 @@ doctor_config() {
     [ -d "$data_root" ] || fail 'MAILBOX_ROOT does not point to an existing directory. Correct .env or supply MAILBOX_ROOT explicitly.'
     [ -f "$data_root/projects.json" ] || fail 'MAILBOX_ROOT has no projects.json. Select the mailbox workspace, or use make demo for synthetic data.'
     printf 'OK: mailbox directory and projects.json\nOK: Compose configuration\n'
+}
+
+# Only a dedicated data directory can be read as its owner. The alternative
+# layouts also mount a checkout or credentials and keep the image's nobody ID.
+select_dashboard_user() {
+    mailbox_dir=$(CDPATH= cd -- "$data_root" 2>/dev/null && pwd -P 2>/dev/null) || fail 'Cannot locate the dashboard mailbox.'
+    checkout_dir=$(pwd -P)
+    [ "$mailbox_dir" != / ] || return 0
+    case "$checkout_dir/" in "$mailbox_dir/"*) return ;; esac
+    [ ! -e "$mailbox_dir/.git" ] || return 0
+    if [ -d "$mailbox_dir/dashboard" ]; then
+        dashboard_dir=$(CDPATH= cd -- "$mailbox_dir/dashboard" 2>/dev/null && pwd -P 2>/dev/null) || return 0
+        case "$dashboard_dir/" in "$mailbox_dir/"*) return 0 ;; esac
+    fi
+    for sensitive in "$mailbox_dir/.env" "$mailbox_dir/.env.local"; do
+        if [ -L "$sensitive" ]; then
+            # The standalone installation can link its token to the sibling
+            # checkout. That target stays outside the container's bind mount.
+            [ "$sensitive" = "$mailbox_dir/.env.local" ] || return 0
+            [ "$(readlink "$sensitive" 2>/dev/null)" = '../.env.local' ] && [ ! -L "$mailbox_dir/../.env.local" ] || return 0
+        elif [ -e "$sensitive" ]; then
+            return 0
+        fi
+    done
+    # GNU/Linux (including WSL) and BSD/macOS stat use different format flags.
+    owner=$(stat -Lc '%u:%g' "$mailbox_dir" 2>/dev/null || stat -Lf '%u:%g' "$mailbox_dir" 2>/dev/null) || fail 'Cannot identify the dashboard mailbox owner.'
+    case "$owner" in 0:*|*:0) return ;; esac
+    DASHBOARD_USER=$owner
 }
 
 # A mailbox either lives in this checkout or holds it as a subdirectory.
@@ -164,7 +200,7 @@ case "${1:-help}" in
         printf 'Setup complete. Open a new terminal and run team.\n'
         ;;
     build) doctor_deps; doctor_config; compose build ;;
-    up) doctor_deps; doctor_config; compose up -d --build --wait ;;
+    up) doctor_deps; doctor_config; select_dashboard_user; compose up -d --build --wait ;;
     ensure-dashboard)
         team_root=${2:-}
         if [ -n "$team_root" ]; then
@@ -174,14 +210,22 @@ case "${1:-help}" in
             MAILBOX_ROOT=$(detect_mailbox_root)
             export MAILBOX_ROOT
         fi
-        state=$(dashboard_state)
-        [ "$state" != running ] || exit 0
         doctor_config
-        compose up -d --no-recreate --no-deps --wait dashboard
+        team_root=$data_root
+        MAILBOX_ROOT=$data_root
+        export MAILBOX_ROOT
+        select_dashboard_user
+        state=$(dashboard_state)
+        case "$state" in
+            running) exit 0 ;;
+            replace-reader) recreate=--force-recreate ;;
+            *) recreate=--no-recreate ;;
+        esac
+        compose up -d "$recreate" --no-deps --wait dashboard
         state=$(dashboard_state)
         [ "$state" = running ] || fail 'Dashboard service did not start.'
         ;;
-    restart) doctor_deps; doctor_config; compose up -d --build --force-recreate --wait ;;
+    restart) doctor_deps; doctor_config; select_dashboard_user; compose up -d --build --force-recreate --wait ;;
     down) doctor_deps; compose down ;;
     status) doctor_deps; compose ps ;;
     logs) doctor_deps; compose logs --follow --tail 100 dashboard ;;
@@ -193,7 +237,7 @@ case "${1:-help}" in
         ;;
     demo)
         doctor_deps
-        (export MAILBOX_ROOT="$APP_DIR/demo"; doctor_config; compose up -d --build --wait)
+        (export MAILBOX_ROOT="$APP_DIR/demo"; doctor_config; select_dashboard_user; compose up -d --build --wait)
         printf 'Demo fixture mounted; select Explore demo in the dashboard. Run make up to restore live data.\n'
         ;;
     tools) doctor_deps; build_tools ;;

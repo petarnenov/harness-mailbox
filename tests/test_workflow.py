@@ -16,7 +16,8 @@ FAKE_DOCKER = r'''
 import json, os, pathlib, sys
 args = sys.argv[1:]
 with open(os.environ['DOCKER_LOG'], 'a') as log:
-    log.write(json.dumps({'args': args, 'root': os.environ.get('MAILBOX_ROOT')}) + '\n')
+    log.write(json.dumps({'args': args, 'root': os.environ.get('MAILBOX_ROOT'),
+                          'user': os.environ.get('DASHBOARD_USER')}) + '\n')
 if args == ['--version']:
     sys.exit(int(os.environ.get('FAIL_CLI', '0')))
 if args == ['info']:
@@ -33,6 +34,14 @@ if args[0] == 'ps':
 if args[0] == 'inspect':
     if args[-1] != 'abcde1234567':
         sys.exit(1)
+    if '.Config.User' in args[2]:
+        if os.environ.get('FAIL_USER_INSPECT'):
+            print('synthetic-private-detail', file=sys.stderr)
+            sys.exit(1)
+        stored = pathlib.Path(os.environ['DASHBOARD_STATE']).with_suffix('.user')
+        user = os.environ.get('SERVICE_USER', os.environ.get('DASHBOARD_USER', ''))
+        print(stored.read_text() if stored.exists() else user)
+        sys.exit()
     # The Docker inspect template should prefer the client-visible label on desktop engines.
     label = os.environ.get('SERVICE_LABEL') if 'io.harness-mailbox.root' in args[2] else None
     mount = os.environ.get('SERVICE_DATA', os.environ.get('MAILBOX_ROOT', ''))
@@ -67,7 +76,10 @@ if args[0] == 'compose':
         if os.environ.get('SLOW_START'):
             import time
             time.sleep(0.15)
-        pathlib.Path(os.environ['DASHBOARD_STATE']).write_text('running')
+        state = pathlib.Path(os.environ['DASHBOARD_STATE'])
+        if not state.exists() or '--force-recreate' in command:
+            state.with_suffix('.user').write_text(os.environ.get('DASHBOARD_USER', ''))
+        state.write_text('running')
 '''
 
 
@@ -142,6 +154,100 @@ class WorkflowTests(unittest.TestCase):
                     self.assertTrue({'-d', '--no-deps', '--no-recreate'} <= set(start))
                     self.assertNotIn('--build', start)
 
+    def dedicated_mailbox(self, name='private mailbox'):
+        mailbox = Path(self.temp.name).resolve() / name
+        mailbox.mkdir(mode=0o700)
+        if os.geteuid() == 0:
+            os.chown(mailbox, 42421, 42422)
+        (mailbox / 'projects.json').write_text('{"projects":[]}')
+        return mailbox
+
+    def launched_identity(self, mailbox, action='up'):
+        self.log.unlink(missing_ok=True)
+        result = self.run_workflow(action, MAILBOX_ROOT=str(mailbox), DASHBOARD_USER='0:0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        starts = [c for c in self.calls() if 'up' in c['args'] and '--help' not in c['args']]
+        self.assertEqual(len(starts), 1)
+        return starts[0]['user']
+
+    def test_up_and_restart_use_private_mailbox_owner_despite_exported_root_identity(self):
+        mailbox = self.dedicated_mailbox()
+        owner = mailbox.stat()
+        for action in ('up', 'restart'):
+            with self.subTest(action=action):
+                self.assertEqual(self.launched_identity(mailbox, action), f'{owner.st_uid}:{owner.st_gid}')
+        if os.geteuid() == 0:
+            os.chown(mailbox, 0, 0)
+            self.assertEqual(self.launched_identity(mailbox), '65534:65534')
+
+    def test_real_checkout_and_internal_credentials_keep_unprivileged_fallback(self):
+        for marker in ('.git', 'dashboard', 'internal dashboard link', '.env', '.env.local',
+                       'internal credential link'):
+            with self.subTest(marker=marker):
+                mailbox = self.dedicated_mailbox('mailbox with ' + marker)
+                if marker == '.git':
+                    (mailbox / marker).mkdir()
+                elif marker in ('dashboard', 'internal dashboard link'):
+                    checkout = mailbox / ('dashboard' if marker == 'dashboard' else 'embedded checkout')
+                    shutil.copytree(self.app, checkout)
+                    (checkout / '.git').mkdir()
+                    if marker == 'internal dashboard link':
+                        (mailbox / 'dashboard').symlink_to(checkout.name, target_is_directory=True)
+                elif marker == 'internal credential link':
+                    (mailbox / 'private').touch()
+                    (mailbox / '.env.local').symlink_to('private')
+                else:
+                    (mailbox / marker).touch(mode=0o600)
+                self.assertEqual(self.launched_identity(mailbox), '65534:65534')
+
+    def test_dotenv_link_to_parent_credential_keeps_unprivileged_fallback(self):
+        mailbox = self.dedicated_mailbox()
+        (mailbox.parent / '.env.local').touch(mode=0o600)
+        (mailbox / '.env').symlink_to('../.env.local')
+        self.assertEqual(self.launched_identity(mailbox), '65534:65534')
+
+    def test_inaccessible_dashboard_directory_uses_fallback_without_printing_its_path(self):
+        mailbox = self.dedicated_mailbox()
+        checkout = mailbox / 'dashboard'
+        checkout.mkdir(mode=0)
+        self.addCleanup(checkout.chmod, 0o700)
+        result = self.run_workflow('up', MAILBOX_ROOT=str(mailbox))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(str(checkout), result.stdout + result.stderr)
+        starts = [c for c in self.calls() if 'up' in c['args'] and '--help' not in c['args']]
+        self.assertEqual([c['user'] for c in starts], ['65534:65534'])
+
+    def test_team_recreates_owned_service_with_stale_user_once(self):
+        state = self.app / 'state'
+        mailbox = self.dedicated_mailbox()
+        owner = mailbox.stat()
+        (mailbox / 'dashboard').symlink_to(self.app, target_is_directory=True)
+        (mailbox.parent / '.env.local').touch(mode=0o600)
+        (mailbox / '.env.local').symlink_to('../.env.local')
+        for status in ('running', 'exited'):
+            with self.subTest(status=status):
+                self.log.unlink(missing_ok=True)
+                state.write_text(status)
+                state.with_suffix('.user').write_text(f'{owner.st_uid}:{owner.st_gid + 1}')
+                with patch.dict(os.environ, dict(self.env, DASHBOARD_STATE=str(state)), clear=True):
+                    self.assertTrue(self.open_team_dashboard(mailbox))
+                    self.assertTrue(self.open_team_dashboard(mailbox))
+                starts = [c for c in self.calls() if 'up' in c['args'] and '--help' not in c['args']]
+                self.assertEqual(len(starts), 1)
+                start = starts[0]
+                self.assertIn('--force-recreate', start['args'])
+                self.assertIn('--no-deps', start['args'])
+                self.assertNotIn('--no-recreate', start['args'])
+                self.assertEqual(start['user'], f'{owner.st_uid}:{owner.st_gid}')
+
+    def test_failed_dashboard_user_inspection_is_private_and_leaves_service_alone(self):
+        state = self.app / 'state'
+        state.write_text('running')
+        result = self.run_workflow('ensure-dashboard', DASHBOARD_STATE=str(state), FAIL_USER_INSPECT='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('synthetic-private-detail', result.stdout + result.stderr)
+        self.assertFalse(any('up' in c['args'] and '--help' not in c['args'] for c in self.calls()))
+
     def test_dashboard_with_same_compose_name_from_different_checkout_is_left_alone(self):
         state = self.app / 'state'
         foreign = self.root / 'another checkout'
@@ -151,7 +257,7 @@ class WorkflowTests(unittest.TestCase):
                 self.log.unlink(missing_ok=True)
                 state.write_text(status)
                 result = self.run_workflow('ensure-dashboard', DASHBOARD_STATE=str(state),
-                                           SERVICE_OWNER=str(foreign))
+                                           SERVICE_OWNER=str(foreign), SERVICE_USER='0:0')
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(state.read_text(), status)
                 self.assertFalse(any('up' in call['args'] for call in self.calls()))
@@ -189,8 +295,23 @@ class WorkflowTests(unittest.TestCase):
                 state.write_text(status)
                 self.log.unlink(missing_ok=True)
                 with patch.dict(os.environ, dict(self.env, DASHBOARD_STATE=str(state),
-                                                 SERVICE_DATA=str(foreign)), clear=True):
+                                                 SERVICE_DATA=str(foreign), SERVICE_USER='0:0'), clear=True):
                     self.assertFalse(self.open_team_dashboard(self.root))
+                self.assertFalse(any('up' in c['args'] for c in self.calls()))
+                self.assertEqual(state.read_text(), status)
+
+    def test_saved_mailbox_prevents_replacing_foreign_service_without_team_argument(self):
+        configured = self.dedicated_mailbox()
+        (self.app / '.env').write_text(f"MAILBOX_ROOT='{configured}'\n")
+        state = self.app / 'state'
+        for status in ('running', 'exited'):
+            with self.subTest(status=status):
+                self.log.unlink(missing_ok=True)
+                state.write_text(status)
+                result = self.run_workflow('ensure-dashboard', DASHBOARD_STATE=str(state),
+                                           SERVICE_DATA=str(self.root), SERVICE_USER='0:0')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('another mailbox', result.stderr)
                 self.assertFalse(any('up' in c['args'] for c in self.calls()))
                 self.assertEqual(state.read_text(), status)
 
@@ -221,7 +342,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(state.exists())
         self.assertTrue(any('up' in c['args'] for c in self.calls()))
-        self.assertTrue(all(c['root'] is None for c in self.calls()))
+        start, = [c for c in self.calls() if 'up' in c['args']]
+        self.assertEqual(start['root'], str(configured))
         self.assertEqual(env_file.read_text(), content)
 
     def test_concurrent_menu_openings_share_one_dashboard_start(self):
