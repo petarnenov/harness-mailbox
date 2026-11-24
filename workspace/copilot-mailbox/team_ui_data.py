@@ -318,10 +318,12 @@ def _route_binding(root, name, directory, *, reserve=False):
                 os.unlink(temporary, dir_fd=parent)
             return True
         with os.fdopen(fd, "rb") as stream:
-            identity = _directory_identity(directory)
-            content = json.dumps([name, identity]).encode("ascii")
-            if stat.S_ISREG(os.fstat(fd).st_mode) and (identity is not None or reserve):
-                if stream.read(len(content) + 1) == content:
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                if reserve:
+                    return True
+                identity = _directory_identity(directory)
+                content = json.dumps([name, identity]).encode("ascii")
+                if identity is not None and stream.read(len(content) + 1) == content:
                     return True
         raise _RegistryActionError("This project ID belongs to a previously registered folder. Choose another ID.")
     finally:

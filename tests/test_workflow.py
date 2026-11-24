@@ -57,6 +57,9 @@ if args[0] == 'compose':
                 if value.startswith("'") and value.endswith("'"):
                     value = value[1:-1].replace("\\'", "'")
         print('MAILBOX_ROOT=' + (value or ''))
+    elif command[0] == 'exec' and os.environ.get('FAIL_PROBE'):
+        print('Traceback (most recent call last):\n  urllib.error.URLError: http://127.0.0.1:8080/healthz', file=sys.stderr)
+        sys.exit(1)
     elif command[0] == 'up' and 'DASHBOARD_STATE' in os.environ:
         if os.environ.get('FAIL_START'):
             print('synthetic-private-detail', file=sys.stderr)
@@ -443,6 +446,36 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(all(any('target=/workspace,readonly' in a for a in c) for c in runs))
         self.assertTrue(any('COVERAGE_FILE=/coverage/.coverage' in c for c in runs))
         self.assertNotEqual(0, self.run_workflow('invalid').returncode)
+
+    def test_failed_health_probe_reports_one_fixed_line_without_probe_output(self):
+        result = self.run_workflow('health', MAILBOX_ROOT=str(self.root), FAIL_PROBE='1')
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn('Dashboard health check failed.', result.stderr)
+        output = result.stdout + result.stderr
+        for leaked in ('Traceback', 'urllib', '127.0.0.1:8080'):
+            self.assertNotIn(leaked, output)
+
+    def test_answering_health_probe_still_succeeds(self):
+        result = self.run_workflow('health', MAILBOX_ROOT=str(self.root))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotIn('Dashboard health check failed.', result.stdout + result.stderr)
+
+    def test_dockerignore_lists_every_mailbox_record_directory_that_gitignore_lists(self):
+        source = Path(__file__).resolve().parents[1]
+        block = (source / '.gitignore').read_text().split('# Mailbox data belongs outside', 1)[1]
+        block = block.split('\n\n', 1)[0]
+        directories = {line[1:-1] for line in block.splitlines() if line.startswith('/') and line.endswith('/')}
+        self.assertTrue({'archive', 'discovery', 'dispatch-gates', 'decisions', 'deliveries',
+                         'jira-sync', 'reports'} <= directories)
+        ignored = {line.strip().strip('/') for line in (source / '.dockerignore').read_text().splitlines()}
+        self.assertEqual(set(), directories - ignored)
+
+    def test_codex_stop_hook_runs_the_run_close_hook_next_to_the_spec_review_hook(self):
+        source = Path(__file__).resolve().parents[1]
+        hooks = json.loads((source / '.codex/hooks.json').read_text())['hooks']
+        commands = [hook['command'] for group in hooks['Stop'] for hook in group['hooks']]
+        self.assertTrue(any('g1-spec-review-hook.mjs' in command for command in commands), commands)
+        self.assertTrue(any('run-close-hook.mjs' in command for command in commands), commands)
 
     def test_real_make_forwards_from_workspace_with_dollar_in_path(self):
         special = Path(self.temp.name) / 'mailbox $UNSET_REVIEW_PATH # quote\''

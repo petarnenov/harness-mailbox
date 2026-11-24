@@ -51,10 +51,10 @@ const pendingFile = (log) => log + '.adrpending';
  * An unresolved earlier marker is kept, so a second writer cannot hide the first one's missing review.
  */
 export function markWriterDone(log) {
-    if (fs.existsSync(pendingFile(log))) {
+    const reviews = adrReviewCount(fs.readFileSync(log, 'utf8'));
+    if (fs.existsSync(pendingFile(log)) && reviewPending(log)) {
         return;
     }
-    const reviews = adrReviewCount(fs.readFileSync(log, 'utf8'));
     fs.writeFileSync(pendingFile(log), JSON.stringify({ reviews, at: new Date().toISOString() }));
 }
 

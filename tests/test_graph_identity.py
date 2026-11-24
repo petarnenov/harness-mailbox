@@ -3,6 +3,40 @@ import server
 from test_server import Fixture
 
 
+class DuplicateTaskIdentityTests(Fixture):
+    DUPLICATE_WARNING = 'T1: duplicate task identity in tasks/a/T1.json, tasks/b/T1.json; completion evidence ignored'
+
+    def verified_issue_fixture(self, first, second):
+        self.epic('E', ['A-1'], True, [{'key': 'A-1', 'projects': ['a'], 'task_ids': ['T1'],
+                                        'local_status': 'verified_done', 'verification': 'passed',
+                                        'evidence': ['proof']}])
+        self.put('tasks/a/T1.json', {'id': 'T1', **first})
+        self.put('tasks/b/T1.json', {'id': 'T1', **second})
+
+    def test_duplicate_identity_ignores_completion_evidence_whichever_record_is_first(self):
+        evidenced = {'status': 'done', 'evidence': ['proof']}
+        pending = {'status': 'pending'}
+        for name, first, second in (('evidenced first', evidenced, pending), ('evidenced last', pending, evidenced),
+                                    ('both evidenced', evidenced, evidenced)):
+            with self.subTest(name):
+                self.verified_issue_fixture(first, second)
+                data = server.build_dashboard(self.root)
+                self.assertIn(self.DUPLICATE_WARNING, data['warnings'])
+                self.assertEqual([False, False], [t['evidenced'] for t in data['tasks']])
+                issue = data['issues'][0]
+                self.assertFalse(issue['verified'])
+                self.assertEqual('awaiting_verification', issue['local_status'])
+                node = next(n for n in data['graph']['nodes'] if n['id'] == 'task:T1')
+                self.assertFalse(node['ready'])
+
+    def test_unique_task_identity_keeps_its_completion_evidence(self):
+        self.verified_issue_fixture({'status': 'done', 'evidence': ['proof']}, {'id': 'T2', 'status': 'pending'})
+        data = server.build_dashboard(self.root)
+        self.assertEqual([], [w for w in data['warnings'] if 'duplicate' in w])
+        self.assertEqual([True, False], [t['evidenced'] for t in data['tasks']])
+        self.assertTrue(data['issues'][0]['verified'])
+
+
 class GraphIdentityTests(Fixture):
     def test_local_task_identity_and_scope_are_not_jira_identity(self):
         self.epic('E', ['A', 'B'], True, [

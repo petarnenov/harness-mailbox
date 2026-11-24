@@ -41,6 +41,7 @@ One row per completed run. Numbers come from the run log, never from estimates.
 | 2026-11-23 | `team-docs-sync.md` | LOW | da.loop@2026-11-23.1 | 0 | 0 | 0 | 0 | 0 | unavailable | 337s | 0 / 0 / 0 / 0 | 0 |
 | 2026-11-23 | multi-project.md | MEDIUM | 2026-11-23.1 | 5 | 0 | 0 | 0 | 0 | unavailable | unavailable | 0 / 0 / 0 / 0 | 0 |
 | 2026-11-23 | inbound.md | HIGH | 2026-11-23.1 | 3 | 1 | 1 | 1 | 0 | 336429 | 327s | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-23 | `source-review.md` | HIGH | da.loop@2026-11-23.1 | 67, max parallel 6 peers | 42 | 0 | rounds 1-3 BLOCK, round 4 clear | 0 | unavailable | 4631s | 1 / 1 / 0 / 0 | 3 |
 
 ## Lessons
 
@@ -48,3 +49,4 @@ Status values and automatic write-back rules are defined by the target's adapted
 
 | id | status | seen | signal | mechanism | evidence | target | rule |
 |---|---|---|---|---|---|---|---|
+| K01 | applied@2026-11-23 (review=b5366a385ea7717946294ea5fd376ede51d6dc126db0ffef89a4ed06ca023316) | 1 | a change review finds the shape check a fix added at one read of a reply or record missing at sibling reads of the same data | the fix follows the cited line, not the root cause | `.claude/goal-runs/source-review.md`: R2-S3-F7 with four sibling reads, R3-S3-F4, R3-S3-F5 | conventions §K6 (P2) | When a fix adds a shape or type check to one read of an external reply or stored record, apply the same check to every other read of that reply or record in the touched module under the same accepted criterion, and report any read outside that scope as an open finding. |

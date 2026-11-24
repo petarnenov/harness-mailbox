@@ -1,5 +1,5 @@
 {
-  "description": "da.loop G1 gate: no G1 approval request before the spec review is recorded (see .claude/skills/da.loop/SKILL.md step 4). Trust it with /hooks after reviewing scripts/g1-spec-review-hook.mjs.",
+  "description": "da.loop gates: no G1 approval request before the spec review is recorded (see .claude/skills/da.loop/SKILL.md step 4) and no turn end before the run log meets the closing contract. Trust them with /hooks after reviewing scripts/g1-spec-review-hook.mjs and scripts/run-close-hook.mjs.",
   "hooks": {
     "PreToolUse": [
       {
@@ -19,6 +19,11 @@
           {
             "type": "command",
             "command": "f=\"$(git rev-parse --show-toplevel 2>/dev/null)/.claude/skills/da.loop/scripts/g1-spec-review-hook.mjs\"; [ ! -f \"$f\" ] || ! command -v node >/dev/null || node \"$f\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "f=\"$(git rev-parse --show-toplevel 2>/dev/null)/.claude/skills/da.loop/scripts/run-close-hook.mjs\"; [ ! -f \"$f\" ] || ! command -v node >/dev/null || node \"$f\"",
             "timeout": 10
           }
         ]

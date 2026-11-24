@@ -27,6 +27,7 @@ auto-released.
 import argparse
 import json
 import os
+import secrets
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -36,6 +37,7 @@ from mailbox_layout import mailbox_root
 
 MAILBOX = mailbox_root(__file__)
 ADDRESS_FIELDS = ('to_session_id', 'intended_endpoint', 'to_endpoint')
+ORPHAN_FIELDS = ('project', 'lock', 'retired_session')
 
 
 def now():
@@ -44,13 +46,27 @@ def now():
 
 def publish(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name('.' + path.name + '.tmp')
-    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False))
-    os.replace(temporary, path)
+    temporary = path.with_name(f'.{path.name}.{secrets.token_hex(8)}.tmp')
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            handle.write(json.dumps(value, indent=2, ensure_ascii=False))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
-def read(path):
-    return json.loads(path.read_text())
+def read(root, path):
+    """The JSON object stored at path; anything else is refused naming only the relative path."""
+    try:
+        record = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        record = None
+    if not isinstance(record, dict):
+        raise ValueError(f'Malformed or unreadable record: {path.relative_to(root)}')
+    return record
 
 
 def session_ids(record):
@@ -59,7 +75,7 @@ def session_ids(record):
 
 def worker_registrations(root):
     for path in sorted((root / 'sessions').glob('*.json')):
-        record = read(path)
+        record = read(root, path)
         if record.get('role') == 'worker':
             yield path, record
 
@@ -71,18 +87,18 @@ def find_registration(root, session_id):
     return matches[0]
 
 
-def locks_owned_by(root, session_id):
+def locks_owned_by(root, ids):
     for owner_file in sorted((root / 'tasks').glob('*/*.lock/owner.json')):
-        if read(owner_file).get('owner_session_id') == session_id:
+        if read(root, owner_file).get('owner_session_id') in ids:
             yield owner_file
 
 
-def messages_addressed_to(root, project, session_id):
+def messages_addressed_to(root, project, ids):
     if not project:
         return
     for path in sorted((root / 'inbox' / project).glob('*.json')):
-        message = read(path)
-        if session_id in {message.get(field) for field in ADDRESS_FIELDS}:
+        message = read(root, path)
+        if ids & {message.get(field) for field in ADDRESS_FIELDS}:
             yield path
 
 
@@ -105,7 +121,10 @@ def candidate_worktrees(value):
 
 
 def uncommitted_changes(worktree):
-    result = subprocess.run(['git', '-C', worktree, 'status', '--porcelain'], capture_output=True, text=True)
+    try:
+        result = subprocess.run(['git', '-C', worktree, 'status', '--porcelain'], capture_output=True, text=True)
+    except OSError:
+        raise ValueError('git could not be run to inspect the worktrees of the orphaned tasks') from None
     return None if result.returncode else len(result.stdout.splitlines())
 
 
@@ -118,9 +137,9 @@ def inventory(root):
             'session_id': record.get('session_id'), 'agent_id': record.get('agent_id'),
             'session_name': record.get('session_name'), 'host': record.get('host'),
             'last_seen_at': record.get('last_seen_at'),
-            'locks': [str(p.parent.relative_to(root)) for sid in ids for p in locks_owned_by(root, sid)],
-            'unread_messages': [str(p.relative_to(root)) for sid in ids
-                                for p in messages_addressed_to(root, record.get('project'), sid)],
+            'locks': [str(p.parent.relative_to(root)) for p in locks_owned_by(root, ids)],
+            'unread_messages': [str(p.relative_to(root))
+                                for p in messages_addressed_to(root, record.get('project'), ids)],
             'liveness': 'probe required' if record.get('project') and ids else 'malformed registration'})
     return report
 
@@ -129,25 +148,27 @@ def retire(root, session_id, evidence, by):
     if not evidence.strip():
         raise ValueError('Retirement needs evidence of unreachability')
     path, record = find_registration(root, session_id)
-    project, retired_at = record['project'], now()
+    project, retired_at = record.get('project'), now()
+    if not project:
+        raise ValueError(f'The registration of {session_id} names no project')
     archived = root / 'archive' / 'sessions-removed' / path.name
     if archived.exists():
-        raise ValueError(f'{archived} already exists')
+        raise ValueError(f'The archive already holds {archived.relative_to(root)}')
     orphans = []
-    for owner_file in locks_owned_by(root, session_id):
+    for owner_file in locks_owned_by(root, session_ids(record)):
         lock = owner_file.parent
         task_file = lock.with_suffix('.json')
-        task = read(task_file) if task_file.exists() else {}
+        task = read(root, task_file) if task_file.exists() else {}
         worktrees = candidate_worktrees(task)
         orphan = {'task_id': lock.stem, 'project': lock.parent.name, 'task': str(task_file.relative_to(root)),
-                  'lock': str(lock.relative_to(root)), 'previous_owner': read(owner_file),
+                  'lock': str(lock.relative_to(root)), 'previous_owner': read(root, owner_file),
                   'task_status': task.get('status'), 'orphaned_at': retired_at, 'retired_session': session_id,
                   'worktrees': [{'path': w, 'uncommitted_changes': uncommitted_changes(w)} for w in worktrees],
                   'resolution': 'explicit takeover by a registered worker (reconcile_sessions.py takeover)'}
         publish(root / 'orphans' / f'{lock.stem}.json', orphan)
         orphans.append(orphan['task_id'])
     moved = []
-    for message in messages_addressed_to(root, project, session_id):
+    for message in messages_addressed_to(root, project, session_ids(record)):
         target = root / 'archive' / project / message.name
         target.parent.mkdir(parents=True, exist_ok=True)
         os.replace(message, target)
@@ -162,28 +183,46 @@ def retire(root, session_id, evidence, by):
     return retirement
 
 
+def free_archive_path(directory, name):
+    """The task-named file when free, otherwise a unique name beside it."""
+    directory.mkdir(parents=True, exist_ok=True)
+    candidate = directory / name
+    while candidate.exists():
+        candidate = directory / f'{Path(name).stem}.{secrets.token_hex(4)}{Path(name).suffix}'
+    return candidate
+
+
+def archive_without_overwriting(source, target):
+    try:
+        os.link(source, target)
+    except FileExistsError:
+        raise ValueError(f'The archive already holds {target.name}') from None
+    source.unlink()
+
+
 def takeover(root, task_id, new_session, evidence):
     orphan_path = root / 'orphans' / f'{task_id}.json'
     if not orphan_path.exists():
         raise ValueError(f'Task {task_id} is not orphaned; ask its owner, or retire an unreachable owner first')
     if not evidence.strip():
         raise ValueError('Takeover needs evidence: the inspected worktree state and what continues')
-    orphan = read(orphan_path)
+    orphan = read(root, orphan_path)
+    if not all(isinstance(orphan.get(field), str) for field in ORPHAN_FIELDS):
+        raise ValueError(f'Malformed or unreadable record: {orphan_path.relative_to(root)}')
     _, record = find_registration(root, new_session)
     if record.get('project') != orphan['project']:
         raise ValueError(f'{new_session} is registered for {record.get("project")}, not {orphan["project"]}')
     if any(orphan['retired_session'] in session_ids(r) for _, r in worker_registrations(root)):
         raise ValueError('The previous owner is registered again; coordinate with it instead of taking over')
     owner_file = root / orphan['lock'] / 'owner.json'
-    previous = read(owner_file)
+    previous = read(root, owner_file)
+    resolved = free_archive_path(root / 'archive' / 'orphans-resolved', orphan_path.name)
     history = previous.get('succession', []) + [{
         'from': previous.get('owner_session_id'), 'to': new_session, 'at': now(), 'evidence': evidence,
-        'orphan_record': str(orphan_path.relative_to(root))}]
+        'orphan_record': str(orphan_path.relative_to(root)), 'orphan_archive': str(resolved.relative_to(root))}]
     publish(owner_file, {'owner_session_id': new_session, 'session_name': record.get('session_name'),
                          'host': record.get('host'), 'claimed_at': history[-1]['at'], 'succession': history})
-    resolved = root / 'archive' / 'orphans-resolved' / orphan_path.name
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(orphan_path, resolved)
+    archive_without_overwriting(orphan_path, resolved)
     return {'task_id': task_id, 'new_owner': new_session, 'succession': history}
 
 
@@ -216,3 +255,5 @@ if __name__ == '__main__':
         main()
     except ValueError as error:
         raise SystemExit(f'reconcile_sessions: {error}')
+    except OSError:
+        raise SystemExit('reconcile_sessions: a mailbox record could not be read or written')

@@ -1,4 +1,6 @@
 """Behavioral guards for dependency-gated mailbox dispatch and worker validation."""
+import contextlib
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -645,6 +647,356 @@ class DispatchGateTests(unittest.TestCase):
                 sent = self.send()
                 self.assertFalse(sent['allowed'], sent)
                 self.assertEqual([], self.inbox())
+
+    def run_cli(self, *arguments):
+        return subprocess.run([sys.executable, str(Path(dispatch_gate.__file__)), '--root', str(self.root),
+                               *arguments], capture_output=True, text=True)
+
+    def assert_code_written_denial(self, result):
+        self.assertFalse(result['allowed'], result)
+        self.assertTrue(result['reasons'], result)
+        audit = self.read(result['audit_path'])
+        self.assertFalse(audit['allowed'], audit)
+        audit_without_root = json.dumps({k: v for k, v in audit.items() if k != 'root'})
+        root_forms = (str(self.root), str(self.root.resolve()))
+        for text in result['reasons'] + audit['reasons'] + [audit_without_root]:
+            for fragment in LIBRARY_TEXT_FRAGMENTS + root_forms:
+                self.assertNotIn(fragment, text)
+
+    def denied_outcomes(self):
+        evaluated = self.evaluate()
+        sent = self.send()
+        self.assertEqual([], self.inbox())
+        return evaluated, sent
+
+    def assert_check_and_dispatch_deny_in_code_written_text(self):
+        evaluated, sent = self.denied_outcomes()
+        self.assertFalse(evaluated['allowed'], evaluated)
+        self.assertTrue(evaluated['reasons'])
+        for text in evaluated['reasons']:
+            for fragment in LIBRARY_TEXT_FRAGMENTS + (str(self.root), str(self.root.resolve())):
+                self.assertNotIn(fragment, text)
+        self.assert_code_written_denial(sent)
+
+    # S2-F1
+
+    def test_scope_that_is_not_a_json_object_gives_structured_denial_through_the_cli(self):
+        for value in ([], None, 'text', 7):
+            with self.subTest(scope=value):
+                self.put('epics/E/scope.json', value)
+                evaluated = self.evaluate()
+                self.assertFalse(evaluated['allowed'], evaluated)
+                checked = self.run_cli('check', '--task', self.task_path)
+                self.assertNotEqual(0, checked.returncode)
+                self.assertNotIn('Traceback', checked.stderr)
+                result = json.loads(checked.stdout)
+                self.assertFalse(result['allowed'], result)
+                self.assertTrue(result['reasons'], result)
+                self.assertFalse(self.read(result['audit_path'])['allowed'])
+                dispatched = self.run_cli('dispatch', '--task', self.task_path, '--worker-id', self.endpoint)
+                self.assertNotEqual(0, dispatched.returncode)
+                self.assertNotIn('Traceback', dispatched.stderr)
+                denied = json.loads(dispatched.stdout)
+                self.assertFalse(denied['allowed'], denied)
+                self.assertFalse(self.read(denied['audit_path'])['allowed'])
+                self.assertEqual([], self.inbox())
+
+    def test_scope_that_is_not_a_json_object_denies_validation_of_an_earlier_receipt(self):
+        sent = self.send()
+        self.assertTrue(sent['allowed'], sent)
+        self.put('epics/E/scope.json', [])
+        validated = self.validate(sent)
+        self.assertFalse(validated['allowed'], validated)
+        self.assertTrue((self.root / validated['audit_path']).is_file())
+
+    # S2-F2
+
+    def test_invalid_json_and_encoding_in_a_record_deny_without_decoder_text(self):
+        record = self.root / 'epics/E/progress.json'
+        for name, content in (('invalid json', b'{not-json'), ('invalid encoding', b'\xff\xfe\x00bad'),
+                              ('truncated', b'{"generated_at": ')):
+            with self.subTest(case=name):
+                record.write_bytes(content)
+                try:
+                    self.assert_check_and_dispatch_deny_in_code_written_text()
+                finally:
+                    record.unlink()
+
+    def test_unreadable_record_denies_without_os_text_or_path(self):
+        record = self.put('epics/E/progress.json', {'generated_at': 'now'})
+        original = Path.read_text
+
+        def unreadable(path, *args, **kwargs):
+            if path.name == record.name:
+                raise PermissionError(13, 'Permission denied', str(path))
+            return original(path, *args, **kwargs)
+        with patch.object(Path, 'read_text', unreadable):
+            self.assert_check_and_dispatch_deny_in_code_written_text()
+
+    def test_missing_key_in_projection_denies_without_key_text(self):
+        with patch.object(dispatch_gate, 'build_dashboard', lambda root: {'warnings': []}):
+            self.assert_check_and_dispatch_deny_in_code_written_text()
+            self.assertNotIn("'issues'", self.evaluate()['reasons'])
+
+    def test_wrong_typed_projection_field_denies_without_type_error_text(self):
+        with patch.object(dispatch_gate, 'build_dashboard', lambda root: {'warnings': [], 'issues': None}):
+            self.assert_check_and_dispatch_deny_in_code_written_text()
+
+    def test_library_value_error_from_the_projection_is_a_fixed_structure_denial(self):
+        detail = f'{self.root}/secret/location library detail'
+
+        def failing_projection(root):
+            raise ValueError(detail)
+        with patch.object(dispatch_gate, 'build_dashboard', failing_projection):
+            self.assertEqual(['Mailbox record structure is malformed'], self.evaluate()['reasons'])
+            sent = self.send()
+            self.assertEqual([], self.inbox())
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                dispatch_gate.main(['--root', str(self.root), 'check', '--task', self.task_path])
+        result = json.loads(printed.getvalue())
+        self.assertEqual(['Mailbox record structure is malformed'], result['reasons'])
+        for record_text in (printed.getvalue(), json.dumps(self.read(result['audit_path'])),
+                            json.dumps(self.read(sent['audit_path']))):
+            self.assertNotIn('library detail', record_text)
+            self.assertNotIn('/secret/location', record_text)
+
+    def test_invalid_json_receipt_or_envelope_denies_validation_without_decoder_text(self):
+        sent = self.send()
+        receipt = self.root / sent['audit_path']
+        envelope = self.root / sent['message_path']
+        receipt_bytes, envelope_bytes = receipt.read_bytes(), envelope.read_bytes()
+        for target, original in ((receipt, receipt_bytes), (envelope, envelope_bytes)):
+            for name, content in (('invalid json', b'{broken'), ('invalid encoding', b'\xff\xfe\x00bad')):
+                with self.subTest(record=target.name, case=name):
+                    target.write_bytes(content)
+                    try:
+                        self.assert_code_written_denial(self.validate(sent))
+                    finally:
+                        target.write_bytes(original)
+
+    def test_unreadable_receipt_denies_validation_without_os_text_or_path(self):
+        sent = self.send()
+        receipt_name = Path(sent['audit_path']).name
+        original = Path.read_text
+
+        def unreadable(path, *args, **kwargs):
+            if path.name == receipt_name:
+                raise PermissionError(13, 'Permission denied', str(path))
+            return original(path, *args, **kwargs)
+        with patch.object(Path, 'read_text', unreadable):
+            self.assert_code_written_denial(self.validate(sent))
+
+    def test_malformed_uuid_is_not_canonical_without_raising(self):
+        for value in ('not-a-uuid', '', '1234', str(uuid.uuid4()).upper(), '{' + str(uuid.uuid4()) + '}',
+                      None, 7, ['x']):
+            with self.subTest(value=value):
+                self.assertIs(False, dispatch_gate._uuid(value))
+        self.assertIs(True, dispatch_gate._uuid(self.target))
+
+    def test_malformed_task_uuid_keeps_the_gate_target_reason(self):
+        self.put('tasks/p/not-a-uuid.json', {'id': 'not-a-uuid', 'project': 'p'})
+        result = dispatch_gate.evaluate(self.root, 'tasks/p/not-a-uuid.json')
+        self.assertFalse(result['allowed'], result)
+        self.assertTrue(any('Target must be tasks/' in reason for reason in result['reasons']), result)
+        self.assertFalse(any('badly formed' in reason for reason in result['reasons']), result)
+
+    def test_malformed_message_id_keeps_the_gate_reason_and_is_audited(self):
+        result = self.send(message_id='not-a-uuid')
+        self.assertFalse(result['allowed'], result)
+        self.assertIn('Message ID must be a canonical UUID', result['reasons'])
+        self.assert_code_written_denial(result)
+        self.assertEqual([], self.inbox())
+
+    def test_malformed_receipt_uuid_keeps_the_gate_reason(self):
+        result = self.send()
+        value = self.read(result['audit_path'])
+        self.put(result['audit_path'], {**value, 'id': 'not-a-receipt-uuid'})
+        validated = self.validate(result)
+        self.assertIn('Dispatch receipt ID must be a canonical UUID', validated['reasons'])
+        self.assert_code_written_denial(validated)
+
+    def test_malformed_envelope_uuid_keeps_the_gate_reason(self):
+        self.put('inbox/p/not-a-uuid.json', {'id': 'not-a-uuid'})
+        validated = dispatch_gate.validate(self.root, 'inbox/p/not-a-uuid.json', self.endpoint)
+        self.assertTrue(any('Worker validates an existing UUID inbox envelope only' in reason
+                            for reason in validated['reasons']), validated)
+        self.assert_code_written_denial(validated)
+
+    def test_gate_own_value_error_reasons_stay_verbatim(self):
+        record = self.root / 'epics/E/progress.json'
+        record.write_text('{"generated_at": NaN}')
+        self.assertEqual(['Non-finite JSON: NaN'], self.evaluate()['reasons'])
+        record.write_text('{"generated_at": 1, "generated_at": 2}')
+        self.assertEqual(['Duplicate JSON key in epics/E/progress.json: generated_at'],
+                         self.evaluate()['reasons'])
+
+    # R2-S2-F1 and R2-S2-F2 (amendment 15)
+
+    def alias_of_root(self):
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        alias = Path(holder.name) / 'alias'
+        alias.symlink_to(self.root, target_is_directory=True)
+        return alias
+
+    def assert_output_and_audit_expose_no_path(self, printed, hidden_everywhere, hidden_outside_root_field):
+        result = json.loads(printed)
+        audit = self.read(result['audit_path'])
+        for text in (printed, json.dumps(audit)):
+            for path in hidden_everywhere:
+                self.assertNotIn(path, text)
+        for text in (json.dumps({k: v for k, v in result.items() if k != 'root'}),
+                     json.dumps({k: v for k, v in audit.items() if k != 'root'})):
+            for path in hidden_outside_root_field:
+                self.assertNotIn(path, text)
+        return result
+
+    def test_absolute_task_path_through_a_root_alias_is_outside_the_mailbox_root(self):
+        alias = self.alias_of_root()
+        through_alias = str(alias / self.task_path)
+        hidden = (str(alias), str(self.root.resolve()))
+        self.assertEqual(['Path is outside mailbox root'], dispatch_gate.evaluate(self.root, through_alias)['reasons'])
+        checked = self.run_cli('check', '--task', through_alias)
+        self.assertNotEqual(0, checked.returncode)
+        self.assertNotIn('Traceback', checked.stderr)
+        result = self.assert_output_and_audit_expose_no_path(checked.stdout, (str(alias),), hidden)
+        self.assertEqual(['Path is outside mailbox root'], result['reasons'])
+        sent = dispatch_gate.dispatch(self.root, through_alias, self.endpoint)
+        self.assertEqual(['Path is outside mailbox root'], sent['reasons'])
+        self.assertEqual([], self.inbox())
+        dispatched = self.run_cli('dispatch', '--task', through_alias, '--worker-id', self.endpoint)
+        self.assertNotEqual(0, dispatched.returncode)
+        result = self.assert_output_and_audit_expose_no_path(dispatched.stdout, (str(alias),), hidden)
+        self.assertEqual(['Path is outside mailbox root'], result['reasons'])
+        self.assertEqual([], self.inbox())
+
+    def test_absolute_message_path_through_a_root_alias_is_outside_the_mailbox_root(self):
+        sent = self.send()
+        alias = self.alias_of_root()
+        through_alias = str(alias / sent['message_path'])
+        hidden = (str(alias), str(self.root.resolve()))
+        validated = dispatch_gate.validate(self.root, through_alias, self.endpoint)
+        self.assertEqual(['Path is outside mailbox root'], validated['reasons'])
+        self.assertFalse(validated['allowed'])
+        cli = self.run_cli('validate', '--message', through_alias, '--worker-id', self.endpoint)
+        self.assertNotEqual(0, cli.returncode)
+        self.assertNotIn('Traceback', cli.stderr)
+        result = self.assert_output_and_audit_expose_no_path(cli.stdout, (str(alias),), hidden)
+        self.assertEqual(['Path is outside mailbox root'], result['reasons'])
+
+    def test_integer_literal_over_the_digit_limit_is_invalid_json_in_a_task_or_other_record(self):
+        oversized = '9' * 5000
+        task_text = (self.root / self.task_path).read_text()
+        records = {self.task_path: task_text[:-1] + ', "big": ' + oversized + '}',
+                   'epics/E/progress.json': '{"generated_at": ' + oversized + '}'}
+        for relative, text in records.items():
+            with self.subTest(record=relative):
+                path = self.root / relative
+                original = path.read_text() if path.exists() else None
+                path.write_text(text)
+                try:
+                    expected = ['Invalid JSON: ' + relative]
+                    self.assertEqual(expected, self.evaluate()['reasons'])
+                    checked = self.run_cli('check', '--task', self.task_path)
+                    printed = checked.stdout
+                    for fragment in ('Exceeds the limit', 'set_int_max_str_digits', 'Traceback'):
+                        self.assertNotIn(fragment, printed + checked.stderr)
+                    result = self.assert_output_and_audit_expose_no_path(
+                        printed, (), (str(self.root), str(self.root.resolve())))
+                    self.assertEqual(expected, result['reasons'])
+                    for fragment in ('Exceeds the limit', 'set_int_max_str_digits'):
+                        self.assertNotIn(fragment, json.dumps(self.read(result['audit_path'])))
+                    sent = self.send()
+                    self.assertEqual(expected, sent['reasons'])
+                    self.assertEqual([], self.inbox())
+                finally:
+                    if original is None:
+                        path.unlink()
+                    else:
+                        path.write_text(original)
+
+    # S2-F3 through the server change (contract 5)
+
+    def test_malformed_delivery_record_does_not_deny_an_otherwise_dispatchable_task(self):
+        for name, content in (('missing stage', '{}'), ('unsupported stage', '{"delivery_stage": "nonsense"}'),
+                              ('invalid json', '{not-json')):
+            with self.subTest(case=name):
+                record = self.root / 'deliveries' / f'{self.target}.json'
+                record.parent.mkdir(exist_ok=True)
+                record.write_text(content)
+                try:
+                    result = self.evaluate()
+                finally:
+                    record.unlink()
+                self.assertTrue(result['allowed'], result)
+                self.assertFalse(any('Authoritative graph warning' in reason for reason in result['reasons']))
+
+    def test_malformed_worked_so_far_does_not_deny_an_otherwise_dispatchable_task(self):
+        for name, content in (('invalid json', '{not-json'), ('wrong shape', '[]')):
+            with self.subTest(case=name):
+                record = self.root / 'jira-sync' / 'worked-so-far.json'
+                record.parent.mkdir(exist_ok=True)
+                record.write_text(content)
+                try:
+                    sent = self.send()
+                finally:
+                    record.unlink()
+                self.assertTrue(sent['allowed'], sent)
+                self.assertFalse(any('Authoritative graph warning' in reason for reason in sent['reasons']))
+                self.inbox()[0].unlink()
+                for stale in self.audit():
+                    stale.unlink()
+
+    # protect: authoritative warnings still deny
+
+    def test_warning_from_an_authoritative_record_still_denies(self):
+        sibling = str(uuid.uuid4())
+        mutations = {
+            'task': lambda: self.put(f'tasks/p/{sibling}.json', {'id': sibling, 'project': 5}),
+            'issue': lambda: self.put('epics/E/issues.json', [{'key': 'A', 'projects': ['p']}, {'key': 5}]),
+            'scope': lambda: self.put('epics/E/scope.json', {'epic_key': 5, 'issue_keys': ['A']}),
+            'registry': lambda: self.put('projects/bad.json', {'id': ''}),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(record=name):
+                self.tearDown()
+                self.setUp()
+                mutate()
+                evaluated, sent = self.denied_outcomes()
+                self.assertTrue(any('Authoritative graph warning' in reason for reason in evaluated['reasons']),
+                                evaluated)
+                self.assertFalse(sent['allowed'], sent)
+
+    # protect: denial and publication
+
+    def test_denied_dispatch_publishes_no_allowed_record(self):
+        dependency = self.task()
+        self.update_task(depends_on=[dependency])
+        sent = self.send()
+        self.assertFalse(sent['allowed'], sent)
+        self.assertEqual([], self.inbox())
+        records = [self.read(path.relative_to(self.root)) for path in self.audit()]
+        self.assertTrue(records)
+        self.assertFalse(any(record['allowed'] for record in records))
+
+    def test_publication_never_overwrites_an_existing_record_and_leaves_no_temporary_file(self):
+        relative = Path('dispatch-gates') / self.target / 'existing.json'
+        dispatch_gate._publish(self.root, relative, {'first': True})
+        before = (self.root / relative).read_bytes()
+        with self.assertRaises(FileExistsError):
+            dispatch_gate._publish(self.root, relative, {'second': True})
+        self.assertEqual(before, (self.root / relative).read_bytes())
+        self.assertEqual([relative.name], sorted(p.name for p in (self.root / relative.parent).iterdir()))
+
+    def test_successful_dispatch_leaves_no_temporary_publication_file(self):
+        self.assertTrue(self.send()['allowed'])
+        leftovers = [p for p in self.root.rglob('*.tmp')]
+        self.assertEqual([], leftovers)
+
+
+LIBRARY_TEXT_FRAGMENTS = ('Expecting', 'Errno', 'codec', 'Traceback', 'badly formed', 'Permission denied',
+                          'No such file', 'NoneType', 'JSONDecodeError', 'line 1 column')
 
 
 if __name__ == '__main__':

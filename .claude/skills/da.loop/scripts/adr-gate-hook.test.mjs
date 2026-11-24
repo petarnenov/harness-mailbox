@@ -81,10 +81,27 @@ test('a review recorded before the writer finished does not clear the gate', (t)
 
 test('a second writer keeps the unresolved marker of the first', (t) => {
     const { root, hook, appendReview } = repo(t);
+    appendReview();
+    hook({}, '--event', 'writer-done');
+    hook({}, '--event', 'writer-done');
+    appendReview();
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root, LOG + '.adrpending'), 'utf8')).reviews, 1);
+    assert.equal(hook(question).stdout, '');
+});
+
+test('a second writer after a recorded review is gated until its own review line exists', (t) => {
+    const { hook, appendReview, pending } = repo(t);
     hook({}, '--event', 'writer-done');
     appendReview();
     hook({}, '--event', 'writer-done');
-    assert.equal(JSON.parse(fs.readFileSync(path.join(root, LOG + '.adrpending'), 'utf8')).reviews, 0);
+    const answer = hook(question);
+    assert.notEqual(answer.stdout, '', 'the second writer needs its own ADR review');
+    assert.ok(denied(answer));
+    assert.ok(pending());
+    assert.equal(JSON.parse(hook({ hook_event_name: 'Stop' }).stdout).decision, 'block');
+    appendReview();
+    assert.equal(hook(question).stdout, '');
+    assert.equal(pending(), false);
 });
 
 test('the Stop gate blocks at most three times per run log', (t) => {

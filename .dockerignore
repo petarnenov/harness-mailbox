@@ -34,5 +34,10 @@ archive
 .team-registry-*
 .team-socket-*
 discovery
+dispatch-gates
+decisions
+deliveries
+jira-sync
+reports
 
 .coverage-output

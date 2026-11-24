@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
+import { mentionsLogName } from './run-close-hook.mjs';
 
 const LEDGER = '.claude/skills/da.loop/lessons.md';
 const BOOKS = {
@@ -253,7 +254,7 @@ function approvalRecord(root, row, fingerprint) {
     if (!/^[a-f0-9]{64}$/.test(fingerprint ?? '')) return null;
     const runs = read(path.join(root, LEDGER)).split('## Runs')[1]?.split(/\n## /)[0] ?? '';
     for (const log of runLogs(root)) {
-        if (log.dir !== '.claude/goal-runs' || !log.valid || !runs.includes(log.name)) continue;
+        if (log.dir !== '.claude/goal-runs' || !log.valid || !mentionsLogName(runs, log.name)) continue;
         const file = path.join(root, log.dir, log.name);
         // Local .codex logs and symlinks outside the committed run directory are not PR evidence.
         if (fs.realpathSync(file) !== file) continue;
@@ -532,7 +533,7 @@ function cmdCheck(root) {
         if (log.dir !== '.claude/goal-runs') {
             continue;
         }
-        if (!runsSection.includes(log.name)) {
+        if (!mentionsLogName(runsSection, log.name)) {
             errors.push(`run log ${log.name} has no row under ## Runs`);
         }
     }

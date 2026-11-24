@@ -11,6 +11,7 @@ copy test files into a scratchpad worktree for red-at-base checks and run the
 python and node test suites or the `make` verification targets; the scratchpad is Claude Code's per-user `/tmp/claude-*` root.
 """
 import json
+import posixpath
 import re
 import shlex
 import sys
@@ -19,18 +20,20 @@ TEST_PATH = re.compile(r"((^|/)tests/|\.test\.[cm]?js$|_test\.py$|(^|/)test_[^/]
 SCRATCHPAD_PATH = re.compile(r"^/tmp/claude-")
 SHELL_WRITE = re.compile(
     r"(sed\s+(-[a-zA-Z]*i|--in-place)|\btee\b|\bcp\b|\bmv\b|\brm\b|\btouch\b|\bmkdir\b|\bln\b|\bchmod\b|"
-    r"\bdd\b|perl\s+-[a-zA-Z]*i|\bpython3?\b|\bnode\s+-e|"
+    r"\bdd\b|\bpatch\b|perl\s+-[a-zA-Z]*i|\bpython3?\b|\bnode\s+-e|"
     r"git\s+(checkout|reset|restore|commit|stash|apply|add|rm|mv|clean|switch|merge|rebase|cherry-pick|push|worktree)|"
     r"(^|[^0-9&>])>{1,2}\s*(?!/dev/null|&))"
 )
-CD_PREFIX = r"^\s*(cd\s+\S+\s*&&\s*)?"
+CD_COMMAND = r"\s*cd\s+[^\s;|&<>$`]+\s*&&\s*"
+CD_PREFIX = r"^(" + CD_COMMAND + r")?\s*"
 MAKE_RUNNER = r"make\s+(?:test|lint|check|coverage|doctor|status|health)"
 BUILD_RUNNER = re.compile(CD_PREFIX + r"(" + MAKE_RUNNER + r"|node\s+--(?:test|check)|sh\s+-n|git\s+(diff|log|show|status|rev-parse|ls-files))\b")
 PYTHON_TEST_RUNNER = re.compile(CD_PREFIX + r"python3?\s+(-m\s+(pytest|unittest)\b|test_[^\s/]+\.py\b)")
-READONLY_GIT = re.compile(r"^\s*git\s+(diff|log|show|status|rev-parse|ls-files)\b[^;|&>]*$")
+READONLY_GIT = re.compile(
+    r"[ \t]*git[ \t]+(diff|log|show|status|rev-parse|ls-files)(?![A-Za-z0-9_-])(?!.*--output)[A-Za-z0-9_ \t./:=@~^,+%-]*")
 SCRATCHPAD_COPY = re.compile(r"^\s*(cp\b|git\s+worktree\s+(add|remove|prune)\b)")
 CHAINED = re.compile(r"[;|]|&&.*&&")
-ANY_CHAIN = re.compile(r"[;|&>]")
+ANY_CHAIN = re.compile(r"[;|&<>`\n]|\$\(")
 
 
 def deny(reason):
@@ -50,7 +53,7 @@ def is_scratchpad_path(path):
 
 
 def body_after_cd(cmd):
-    return re.sub(r"^\s*cd\s+\S+\s*&&\s*", "", cmd)
+    return re.sub(r"^" + CD_COMMAND, "", cmd)
 
 
 def is_plain_runner(cmd):
@@ -70,9 +73,10 @@ def is_scratchpad_copy(cmd):
     return bool(paths) and all(is_test_path(p) or is_scratchpad_path(p) for p in paths)
 
 
-def guard_edit(role, path):
+def guard_edit(role, written_path):
     if role == "readonly":
         deny("read-only reviewer: file edits are not allowed")
+    path = posixpath.normpath(written_path)
     if role == "code" and is_test_path(path):
         deny("code writer may not touch test files: " + path)
     if role == "test" and not (is_test_path(path) or is_scratchpad_path(path)):
@@ -81,7 +85,7 @@ def guard_edit(role, path):
 
 def guard_shell(role, cmd):
     if role == "readonly":
-        if not READONLY_GIT.match(cmd):
+        if not READONLY_GIT.fullmatch(cmd):
             deny("read-only reviewer: only read-only git (diff|log|show|status|rev-parse|ls-files) is allowed")
         return
     if not SHELL_WRITE.search(cmd):

@@ -188,6 +188,45 @@ test('N3 malformed registered run cannot validate a lesson', t => {
     const result = f.run('validate'); assert.match(result.stdout, /invalid=3/);
     assert.match(f.read(ledger), /applied@2026-01-01/);
 });
+test('check reports a run log that only a longer log name registers', t => {
+    const f = fixture(t); f.log('setup', '2026-01-02');
+    f.put(ledger, f.read(ledger).replace('## Runs\nsetup.md\n', '## Runs\nteam-setup.md\n'));
+    const result = f.run('check'); assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /run log setup\.md has no row under ## Runs/);
+});
+test('check reports a run log that only a shorter log name registers', t => {
+    const f = fixture(t); f.log('team-setup', '2026-01-02');
+    f.put(ledger, f.read(ledger).replace('## Runs\nteam-setup.md\n', '## Runs\nsetup.md\n'));
+    const result = f.run('check'); assert.match(result.stdout, /run log team-setup\.md has no row under ## Runs/);
+});
+test('check accepts a run log registered by its whole name in a table row', t => {
+    const f = fixture(t); f.log('setup', '2026-01-02');
+    f.put(ledger, f.read(ledger).replace('## Runs\nsetup.md\n', '## Runs\n| 2026-01-02 | .claude/goal-runs/setup.md | LOW |\n'));
+    assert.doesNotMatch(f.run('check').stdout, /setup\.md has no row/);
+});
+test('check registers a run log by a row ending with its name and a sentence period', t => {
+    const f = fixture(t); f.log('setup', '2026-01-02');
+    f.put(ledger, f.read(ledger).replace('## Runs\nsetup.md\n', '## Runs\n| 2026-01-02 | closed in setup.md.\n'));
+    assert.doesNotMatch(f.run('check').stdout, /setup\.md has no row/);
+});
+test('check does not register a run log by a row naming its backup', t => {
+    const f = fixture(t); f.log('setup', '2026-01-02');
+    f.put(ledger, f.read(ledger).replace('## Runs\nsetup.md\n', '## Runs\nsetup.md.bak\n'));
+    assert.match(f.run('check').stdout, /run log setup\.md has no row under ## Runs/);
+});
+test('check counts letters of any script as name characters in a row', t => {
+    const f = fixture(t); f.log('ревю', '2026-01-02');
+    f.put(ledger, f.read(ledger).replace('## Runs\nревю.md\n', '## Runs\nпроверкаревю.md\n'));
+    assert.match(f.run('check').stdout, /run log ревю\.md has no row under ## Runs/);
+    f.put(ledger, f.read(ledger).replace('## Runs\nпроверкаревю.md\n', '## Runs\nревю.md\n'));
+    assert.doesNotMatch(f.run('check').stdout, /ревю\.md has no row/);
+});
+test('an approval artifact registered only by a longer log name is not evidence', t => {
+    const f = fixture(t); const key = f.approve();
+    f.put(ledger, f.read(ledger).replace('## Runs\napproval.md\n', '## Runs\nteam-approval.md\n'));
+    const before = f.read(testBook); f.run('apply', '--reviewed', key);
+    assert.equal(f.read(testBook), before); assert.match(f.read(ledger), /proposed/);
+});
 test('N5 check reports a split Runs table', t => {
     const f = fixture(t); f.put(ledger, f.read(ledger).replace('## Runs\n', '## Runs\n| date | log |\n|---|---|\n| day | one |\n\n| day | two |\n'));
     const result = f.run('check'); assert.notEqual(result.status, 0); assert.match(result.stdout, /Runs table/);

@@ -67,16 +67,96 @@ def record_teams(record, fallback):
     return explicit if explicit is not None else title_teams(record) or fallback
 
 
-def read_json(root, path, warnings):
+class UnreadableRecord(Exception):
+    """A mailbox file the guarded reader refuses; the message is a code-written reason."""
+
+
+def reject_non_finite(literal):
+    raise UnreadableRecord('Non-finite JSON number: ' + literal)
+
+
+def finite_float(literal):
+    value = float(literal)
+    if not math.isfinite(value):
+        reject_non_finite(literal)
+    return value
+
+
+def finite_int(literal):
+    finite_float(literal)
+    return int(literal)
+
+
+def load_guarded_json(root, path):
     try:
         if not path.resolve().is_relative_to(root.resolve()) or path.is_symlink():
-            raise ValueError('symlink/outside data root')
+            raise UnreadableRecord('symlink/outside data root')
         if path.stat().st_size > 4_000_000:
-            raise ValueError('exceeds 4 MB limit')
-        return json.loads(path.read_text(), parse_constant=lambda value: (_ for _ in ()).throw(ValueError('Non-finite JSON number: ' + value)))
-    except (OSError, ValueError) as exc:
-        warnings.append(f'{path.relative_to(root)}: {exc}')
+            raise UnreadableRecord('exceeds 4 MB limit')
+        return json.loads(path.read_text(encoding='utf-8'), parse_constant=reject_non_finite, parse_float=finite_float, parse_int=finite_int)
+    except OSError:
+        raise UnreadableRecord('unreadable file') from None
+    except ValueError:
+        raise UnreadableRecord('invalid JSON') from None
+
+
+def record_label(root, path):
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return path.name
+
+
+def read_json(root, path, warnings):
+    try:
+        return load_guarded_json(root, path)
+    except UnreadableRecord as rejection:
+        warnings.append(f'{record_label(root, path)}: {rejection}')
         return None
+
+
+def task_link_fields(data, source, warnings):
+    """Task issue_key, epic_key and status as projected; malformed values are reported, never raised."""
+    fields = {'issue_key': data.get('issue_key'), 'epic_key': data.get('epic_key'), 'status': data.get('status', 'pending')}
+    if not isinstance(fields['issue_key'], (str, list, type(None))):
+        warnings.append(f'{source}: invalid issue_key ignored')
+        fields['issue_key'] = None
+    if not isinstance(fields['epic_key'], (str, type(None))):
+        warnings.append(f'{source}: invalid epic_key ignored')
+        fields['epic_key'] = None
+    if not isinstance(fields['status'], str):
+        warnings.append(f'{source}: invalid task status ignored')
+        fields['status'] = 'unknown'
+    return fields
+
+
+def withhold_duplicate_task_evidence(tasks, warnings):
+    """A task id found in several records has no trustworthy completion evidence, whatever the file order."""
+    sources = {}
+    for task in tasks:
+        sources.setdefault(task['id'], []).append(task['source'])
+    duplicated = {task_id for task_id, found_in in sources.items() if len(found_in) > 1}
+    for task_id in sorted(duplicated):
+        warnings.append(f"{task_id}: duplicate task identity in {', '.join(sorted(sources[task_id]))}; completion evidence ignored")
+    for task in tasks:
+        if task['id'] in duplicated:
+            task['evidenced'] = False
+
+
+def read_scope(root, folder, warnings):
+    """The epic scope object, `{}` when the file is absent, `None` after a warning when it is not an object."""
+    path = folder / 'scope.json'
+    if not path.exists():
+        return {}
+    try:
+        scope = load_guarded_json(root, path)
+    except UnreadableRecord as rejection:
+        warnings.append(f'{record_label(root, path)}: {rejection}')
+        return None
+    if isinstance(scope, dict):
+        return scope
+    warnings.append(f'{path.relative_to(root)}: scope is not a JSON object')
+    return None
 
 
 def task_delivery_stage(root, task_id, warnings):
@@ -177,7 +257,7 @@ def metrics(issues, complete, model):
 def build_dashboard(root, model=None, mode='live'):
     root = Path(root)
     model = model or {'low': 0.5, 'likely': 1.5, 'high': 4.0, 'review_multiplier': 1.25}
-    warnings, projects, tasks, epics, raw_issues, reported, external = [], {}, [], [], [], [], []
+    warnings, delivery_warnings, projects, tasks, epics, raw_issues, reported, external = [], [], {}, [], [], [], [], []
 
     def project(pid, name=None, registered=False):
         if not isinstance(pid, str) or not pid:
@@ -245,25 +325,29 @@ def build_dashboard(root, model=None, mode='live'):
             warnings.append(f'{path.name}: invalid task identity')
             continue
         project(pid)
+        source = str(path.relative_to(root))
+        link_fields = task_link_fields(data, source, warnings)
         tasks.append({'id': data.get('id', path.stem), 'project': pid, 'title': data.get('title', path.stem),
-                      'status': data.get('status', 'pending'), 'issue_key': data.get('issue_key'),
-                      'epic_key': data.get('epic_key'), 'issue_keys': sorted(set(strings(data.get('issue_key')) + strings(data.get('issue_keys')))),
-                      'blockers': strings(data.get('blockers')), 'source': str(path.relative_to(root)),
+                      'status': link_fields['status'], 'issue_key': link_fields['issue_key'],
+                      'epic_key': link_fields['epic_key'], 'issue_keys': sorted(set(strings(link_fields['issue_key']) + strings(data.get('issue_keys')))),
+                      'blockers': strings(data.get('blockers')), 'source': source,
                       'depends_on': strings(data.get('depends_on')),
-                      'evidenced': data.get('status') in CLOSED_TASK_STATUSES and evidence(data),
+                      'evidenced': link_fields['status'] in CLOSED_TASK_STATUSES and evidence(data),
                       'evidence': evidence_refs(data),
                       'updated_at': data.get('updated_at'),
                       'owner': data.get('owner'),
                       'owner_session_id': data.get('owner_session_id'),
-                      'delivery_stage': task_delivery_stage(root, data.get('id', path.stem), warnings),
+                      'delivery_stage': task_delivery_stage(root, data.get('id', path.stem), delivery_warnings),
                       'teams': record_teams(data, projects[pid]['teams']),
                       '_inherit_teams': explicit_teams(data) is None and title_teams(data) is None})
+    withhold_duplicate_task_evidence(tasks, warnings)
     task_map = {t['id']: t for t in tasks}
     for folder in sorted((root / 'epics').glob('*')):
         if not folder.is_dir():
             continue
-        scope = read_json(root, folder / 'scope.json', warnings) if (folder / 'scope.json').exists() else {}
-        scope = scope if isinstance(scope, dict) else {}
+        scope = read_scope(root, folder, warnings)
+        scope_is_object = scope is not None
+        scope = scope or {}
         key = scope.get('epic_key', scope.get('key', folder.name))
         if not isinstance(key, str):
             warnings.append(f'{folder.name}: invalid epic key')
@@ -275,7 +359,7 @@ def build_dashboard(root, model=None, mode='live'):
                     external.append({'key': dependency, 'epic': key})
                 elif isinstance(dependency, dict) and isinstance(dependency.get('key'), str):
                     external.append({**dependency, 'epic': key})
-        complete = scope.get('enumeration_complete', scope.get('scope_complete')) is True
+        complete = scope_is_object and scope.get('enumeration_complete', scope.get('scope_complete')) is True
         declared = strings(scope.get('issue_keys', scope.get('in_scope_issue_keys', scope.get('issues'))))
         issue_path = folder / 'issues.json'
         items = read_json(root, issue_path, warnings) if issue_path.exists() else None
@@ -319,15 +403,13 @@ def build_dashboard(root, model=None, mode='live'):
             if key in links:
                 links[key].add(task['id'])
     issues = {}
-    worked = worked_so_far(root, warnings)
+    worked = worked_so_far(root, delivery_warnings)
     for item in raw_issues:
         key = item.get('key', item.get('issue_key'))
         if not isinstance(key, str):
             warnings.append('Issue without a string key ignored')
             continue
-        pids = sorted(set(strings(item.get('projects', item.get('affected_projects')))))
-        for pid in pids:
-            project(pid)
+        pids = [pid for pid in sorted(set(strings(item.get('projects', item.get('affected_projects'))))) if project(pid)]
         linked = sorted(links[key])
         status = item.get('local_status', 'pending')
         if status not in STATUSES:
@@ -393,7 +475,8 @@ def build_dashboard(root, model=None, mode='live'):
         task['declared_issue_keys'] = task['issue_keys']
         task['unresolved_issue_keys'] = [key for key in task['declared_issue_keys'] if key not in issues and key not in epic_keys]
         task['issue_keys'] = sorted({i['key'] for i in issue_list if task['id'] in i['task_ids']})
-        task['mapping_kind'] = 'issue' if task['issue_keys'] else 'epic' if task['issue_key'] in epic_keys or task['epic_key'] in epic_keys else 'unmapped'
+        names_epic = any(isinstance(name, str) and name in epic_keys for name in (task['issue_key'], task['epic_key']))
+        task['mapping_kind'] = 'issue' if task['issue_keys'] else 'epic' if names_epic else 'unmapped'
         if task['mapping_kind'] == 'epic' and not task['epic_key']:
             task['epic_key'] = task['issue_key']
         if task['unresolved_issue_keys']:
@@ -426,7 +509,6 @@ def build_dashboard(root, model=None, mode='live'):
     dependencies = [{'from': dep, 'to': i['key'], 'kind': 'depends_on', 'unresolved': dep not in issues}
                     for i in issue_list for dep in i['dependencies']]
     graph = build_graph(root, list(projects.values()), epics, issue_list, tasks, raw_issues, external, read_json, warnings)
-    delivery_warnings = []
     project_delivery(issue_list, tasks, raw_issues, graph, delivery_warnings)
     return {'generated_at': datetime.now(timezone.utc).isoformat(), 'mode': mode, 'warnings': warnings,
             'delivery_warnings': delivery_warnings,
@@ -438,6 +520,41 @@ def build_dashboard(root, model=None, mode='live'):
             'totals': metrics(issue_list, complete, model), 'estimate_method': model}
 
 
+MODEL_RANGE_MESSAGE = 'Model requires 0 ≤ low ≤ likely ≤ high ≤ 1000 and 1 ≤ review multiplier ≤ 1000'
+MODEL_DEFAULTS = {'low': .5, 'likely': 1.5, 'high': 4, 'review_multiplier': 1.25}
+
+
+class InvalidRequest(Exception):
+    """A query the client got wrong; the message is a fixed text that is safe to return."""
+
+
+def parse_model(query):
+    try:
+        model = {k: float(query.get(k, [default])[0]) for k, default in MODEL_DEFAULTS.items()}
+    except ValueError:
+        raise InvalidRequest(MODEL_RANGE_MESSAGE) from None
+    if not all(number(v) and v <= 1000 for v in model.values()) or not model['low'] <= model['likely'] <= model['high'] or model['review_multiplier'] < 1:
+        raise InvalidRequest(MODEL_RANGE_MESSAGE)
+    return model
+
+
+def parse_mode(query):
+    mode = query.get('mode', ['live'])[0]
+    if mode not in ('live', 'demo'):
+        raise InvalidRequest('Unknown mode')
+    return mode
+
+
+def error_body(status):
+    if status == 501:
+        code, message = 'unsupported_method', 'Unsupported method'
+    elif 400 <= status < 500:
+        code, message = 'bad_request', 'Bad request'
+    else:
+        code, message = 'internal_error', 'Request failed'
+    return {'error': {'code': code, 'message': message}}
+
+
 class Handler(BaseHTTPRequestHandler):
     def reply(self, status, data, content_type='application/json; charset=utf-8'):
         payload = json.dumps(data, allow_nan=False).encode() if isinstance(data, (dict, list)) else data
@@ -447,26 +564,38 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'")
+        if self.close_connection:
+            self.send_header('Connection', 'close')
         self.end_headers()
-        self.wfile.write(payload)
+        if self.command != 'HEAD':
+            self.wfile.write(payload)
+
+    def send_error(self, code, message=None, explain=None):
+        self.log_error('code %d, message %s', code, message)
+        self.close_connection = True
+        self.reply(code, error_body(int(code)))
+
+    def dashboard_payload(self, query):
+        model, mode = parse_model(query), parse_mode(query)
+        root = ROOT / 'demo' if mode == 'demo' else Path(os.environ.get('MAILBOX_ROOT', '/data'))
+        return json.dumps(build_dashboard(root, model, mode), allow_nan=False).encode()
+
+    def reply_dashboard(self, query):
+        try:
+            payload = self.dashboard_payload(query)
+        except InvalidRequest as invalid:
+            return self.reply(400, {'error': {'code': 'invalid_request', 'message': str(invalid)}})
+        except Exception as failure:
+            self.log_error('Dashboard projection failed: %r', failure)
+            return self.reply(500, {'error': {'code': 'internal_error', 'message': 'Dashboard data could not be read'}})
+        return self.reply(200, payload)
 
     def do_GET(self):
         parsed = urlsplit(self.path)
         if parsed.path == '/healthz':
             return self.reply(200, {'status': 'ok'})
         if parsed.path == '/api/dashboard':
-            query = parse_qs(parsed.query)
-            try:
-                model = {k: float(query.get(k, [v])[0]) for k, v in {'low': .5, 'likely': 1.5, 'high': 4, 'review_multiplier': 1.25}.items()}
-                if not all(number(v) and v <= 1000 for v in model.values()) or not model['low'] <= model['likely'] <= model['high'] or model['review_multiplier'] < 1:
-                    raise ValueError('Model requires 0 ≤ low ≤ likely ≤ high ≤ 1000 and 1 ≤ review multiplier ≤ 1000')
-                mode = query.get('mode', ['live'])[0]
-                if mode not in ('live', 'demo'):
-                    raise ValueError('Unknown mode')
-                root = ROOT / 'demo' if mode == 'demo' else Path(os.environ.get('MAILBOX_ROOT', '/data'))
-                return self.reply(200, build_dashboard(root, model, mode))
-            except (ValueError, TypeError) as exc:
-                return self.reply(400, {'error': {'code': 'invalid_request', 'message': str(exc)}})
+            return self.reply_dashboard(parse_qs(parsed.query))
         files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/theme.js': ('theme.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}
         if parsed.path in files:
             filename, mime = files[parsed.path]

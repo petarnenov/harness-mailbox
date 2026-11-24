@@ -40,6 +40,14 @@ function sectionLines(text, name) {
 
 const runsSection = (ledger) => (sectionLines(ledger, 'Runs') ?? []).join('\n');
 
+const NAME_CHAR = '[\\p{L}\\p{N}_.-]';
+
+/** True when the whole run-log name appears in the text; a period before whitespace or the end is punctuation. */
+export const mentionsLogName = (text, logName) => {
+    const escaped = logName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?<!${NAME_CHAR})${escaped}(?![\\p{L}\\p{N}_-])(?!\\.${NAME_CHAR})`, 'u').test(text);
+};
+
 /**
  * Whether the closing contract needs a final ADR review: the repository tracks ADRs and the run used a code writer.
  * @param {string} root checkout root
@@ -80,7 +88,7 @@ export function closingGaps(logName, text, ledger, { adrRequired = false } = {})
     if (markers.length !== 1) {
         gaps.push(`expected exactly one \`recurred: none|K..\` line, found ${markers.length} (step 10.1)`);
     }
-    if (!runsSection(ledger).includes(logName)) {
+    if (!mentionsLogName(runsSection(ledger), logName)) {
         gaps.push('no row under `## Runs` in lessons.md (step 10.2)');
     }
     if (!LESSONS_EVIDENCE.test((sectionLines(text, 'Evidence') ?? []).join('\n'))) {

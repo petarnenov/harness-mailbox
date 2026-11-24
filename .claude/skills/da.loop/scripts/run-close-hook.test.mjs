@@ -51,6 +51,37 @@ test('the ledger row must sit under ## Runs, not elsewhere', () => {
     assert.deepEqual(closingGaps(LOG, runLog(), ledger), ['no row under `## Runs` in lessons.md (step 10.2)']);
 });
 
+test('protect: a row naming the run log, bare or in a table cell, registers it', () => {
+    for (const row of [LOG, `| 2026-11-20 | ${LOG} | LOW |`, `- \`.claude/goal-runs/${LOG}\``]) {
+        assert.deepEqual(closingGaps(LOG, runLog(), `## Runs\n${row}\n\n## Lessons\n`), [], row);
+    }
+});
+
+test('a row for a longer log name does not register a run log whose name is a substring of it', () => {
+    const ledger = '## Runs\n| 2026-11-20 | .claude/goal-runs/team-setup.md | LOW |\n\n## Lessons\n';
+    assert.deepEqual(closingGaps('setup.md', runLog(), ledger), ['no row under `## Runs` in lessons.md (step 10.2)']);
+});
+
+test('a row for a shorter log name does not register a run log whose name contains it', () => {
+    const ledger = '## Runs\n| 2026-11-20 | .claude/goal-runs/setup.md | LOW |\n\n## Lessons\n';
+    assert.deepEqual(closingGaps('team-setup.md', runLog(), ledger), ['no row under `## Runs` in lessons.md (step 10.2)']);
+});
+
+test('a row ending with the log name and a sentence period registers it', () => {
+    assert.deepEqual(closingGaps('setup.md', runLog(), '## Runs\n| 2026-11-20 | closed in setup.md.\n\n## Lessons\n'), []);
+});
+
+test('a row naming a backup of the log does not register the log', () => {
+    const gaps = closingGaps('setup.md', runLog(), '## Runs\n| 2026-11-20 | .claude/goal-runs/setup.md.bak | LOW |\n\n## Lessons\n');
+    assert.deepEqual(gaps, ['no row under `## Runs` in lessons.md (step 10.2)']);
+});
+
+test('letters of any script count as name characters when matching a row', () => {
+    const named = (row) => closingGaps('ревю.md', runLog(), `## Runs\n| 2026-11-20 | ${row} | LOW |\n\n## Lessons\n`);
+    assert.deepEqual(named('проверкаревю.md'), ['no row under `## Runs` in lessons.md (step 10.2)']);
+    assert.deepEqual(named('.claude/goal-runs/ревю.md'), []);
+});
+
 test('done needs every task ticked; escalated and stopped runs may leave tasks open', () => {
     const open = '- [x] T1 · done\n- [ ] T2 · blocked';
     assert.deepEqual(closingGaps(LOG, runLog({ tasks: open }), LEDGER), ['`status: done` with an unticked task (step 9)']);

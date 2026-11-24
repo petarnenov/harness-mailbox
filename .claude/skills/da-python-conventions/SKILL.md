@@ -5,7 +5,7 @@ user-invocable: false
 globs: []
 ---
 
-RULEBOOK: da-python@2026-11-23.1
+RULEBOOK: da-python@2026-11-23.2
 
 # Python production rules
 
@@ -45,6 +45,7 @@ Apply these rules to production code in this repository: root modules `server.py
 - **§K6.1 (P2)** Target Python 3.13 as pinned in the Dockerfiles. Use `pathlib`, explicit encodings where text format matters and timezone-aware `datetime`.
 - **§K6.2 (P2)** Keep pure projection and decision logic in small functions that take their inputs explicitly; isolate filesystem, clock and environment access at the edges.
 - **§K6.3 (P3)** Keep modules cohesive, name conversions explicitly and avoid comments that merely repeat code.
+- **§K6.4** (P2) When a fix adds a shape or type check to one read of an external reply or stored record, apply the same check to every other read of that reply or record in the touched module under the same accepted criterion, and report any read outside that scope as an open finding (K01).
 
 ## §K7. Secrets and repository hygiene
 - **§K7.1 (P1)** No credentials, tokens, `.env` files, private keys or real mailbox records in the repository; `projects.json`, `epics/`, `tasks/`, `inbox/`, `outbox/`, `archive/`, `decisions/`, `deliveries/`, `dispatch-gates/` and other runtime data stay ignored.

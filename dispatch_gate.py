@@ -20,6 +20,10 @@ _LOADED_CODE = {name: hashlib.sha256((Path(__file__).parent / name).read_bytes()
                 for name in ('dispatch_gate.py', 'server.py', 'dependency_graph.py', 'delivery_process.py')}
 
 
+class GateRefusal(ValueError):
+    """A refusal whose text the gate itself wrote; only these texts reach a reason."""
+
+
 def _canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
 
@@ -29,13 +33,27 @@ def _hash(value):
 
 
 def _uuid(value):
-    return isinstance(value, str) and str(uuid.UUID(value)) == value
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(uuid.UUID(value)) == value
+    except ValueError:
+        return False
+
+
+def _reason(error):
+    """Code-written denial text; only the gate's own ValueError texts pass through."""
+    if isinstance(error, OSError):
+        return 'Mailbox file could not be read or written'
+    if isinstance(error, GateRefusal):
+        return str(error)
+    return 'Mailbox record structure is malformed'
 
 
 def _root(value):
     original = Path(value).absolute()
     if original.is_symlink() or not original.is_dir():
-        raise ValueError('Mailbox root must be an existing non-symlink directory')
+        raise GateRefusal('Mailbox root must be an existing non-symlink directory')
     return original.resolve()
 
 
@@ -43,35 +61,52 @@ def _safe(root, value, must_exist=True):
     path = Path(value)
     path = path if path.is_absolute() else root / path
     if '..' in path.parts:
-        raise ValueError('Parent path traversal is not supported')
+        raise GateRefusal('Parent path traversal is not supported')
     if not path.resolve().is_relative_to(root):
-        raise ValueError('Path is outside mailbox root')
-    relative = path.relative_to(root)
+        raise GateRefusal('Path is outside mailbox root')
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        raise GateRefusal('Path is outside mailbox root') from None
     cursor = root
     for part in relative.parts:
         cursor = cursor / part
         if cursor.is_symlink():
-            raise ValueError('Symlink input/output is not supported: ' + str(relative))
+            raise GateRefusal('Symlink input/output is not supported: ' + str(relative))
     if must_exist and not path.is_file():
-        raise ValueError('Missing input file: ' + str(relative))
+        raise GateRefusal('Missing input file: ' + str(relative))
     return path
 
 
 def _read(root, value):
     path = _safe(root, value)
-    if path.stat().st_size > MAX_BYTES:
-        raise ValueError('Input exceeds 4 MB: ' + str(path.relative_to(root)))
+    relative = str(path.relative_to(root))
+    try:
+        oversized = path.stat().st_size > MAX_BYTES
+    except OSError:
+        raise GateRefusal('Unreadable file: ' + relative) from None
+    if oversized:
+        raise GateRefusal('Input exceeds 4 MB: ' + relative)
 
     def pairs(items):
         result = {}
         for key, item in items:
             if key in result:
-                raise ValueError('Duplicate JSON key in ' + str(path.relative_to(root)) + ': ' + key)
+                raise GateRefusal('Duplicate JSON key in ' + str(path.relative_to(root)) + ': ' + key)
             result[key] = item
         return result
 
-    return json.loads(path.read_text(), object_pairs_hook=pairs,
-                      parse_constant=lambda value: (_ for _ in ()).throw(ValueError('Non-finite JSON: ' + value)))
+    def reject_constant(value):
+        raise GateRefusal('Non-finite JSON: ' + value)
+
+    try:
+        return json.loads(path.read_text(), object_pairs_hook=pairs, parse_constant=reject_constant)
+    except GateRefusal:
+        raise
+    except ValueError:
+        raise GateRefusal('Invalid JSON: ' + relative) from None
+    except OSError:
+        raise GateRefusal('Unreadable file: ' + relative) from None
 
 
 def _snapshot(root):
@@ -86,7 +121,7 @@ def _snapshot(root):
         relative = str(path.relative_to(root))
         if relative.startswith('sessions/'):
             if not isinstance(data, dict):
-                raise ValueError('Malformed session registration: ' + relative)
+                raise GateRefusal('Malformed session registration: ' + relative)
             # Check-ins do not change dependency eligibility. Identity changes do.
             data = {key: data.get(key) for key in ('role', 'project', 'session_id', 'agent_id',
                                                  'working_directory', 'startup_working_directory')}
@@ -96,10 +131,10 @@ def _snapshot(root):
     for name in ('dispatch_gate.py', 'server.py', 'dependency_graph.py', 'delivery_process.py'):
         path = Path(__file__).parent / name
         if path.is_symlink() or not path.is_file():
-            raise ValueError('Invalid gate code input: ' + name)
+            raise GateRefusal('Invalid gate code input: ' + name)
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if digest != _LOADED_CODE[name]:
-            raise ValueError('Gate/projection code changed; restart this process: ' + name)
+            raise GateRefusal('Gate/projection code changed; restart this process: ' + name)
         inputs['@code/' + name] = digest
     return inputs, _hash(inputs)
 
@@ -113,19 +148,19 @@ def _base(operation, root=None):
 def _registry(root):
     registry = _read(root, 'projects.json')
     if not isinstance(registry, dict) or not isinstance(registry.get('projects'), list):
-        raise ValueError('Malformed project registry')
+        raise GateRefusal('Malformed project registry')
     projects = {}
     for entry in registry['projects']:
         if not isinstance(entry, dict):
-            raise ValueError('Malformed project registry entry: expected an object')
+            raise GateRefusal('Malformed project registry entry: expected an object')
         key = entry.get('id')
         if not isinstance(key, str) or not key.strip() or '/' in key or '\\' in key or key in ('.', '..'):
-            raise ValueError('Malformed project registry entry: invalid routing ID')
+            raise GateRefusal('Malformed project registry entry: invalid routing ID')
         if key in projects:
-            raise ValueError('Duplicate project registry identity: ' + key)
+            raise GateRefusal('Duplicate project registry identity: ' + key)
         if not all(isinstance(entry.get(field), str) and entry[field].strip()
                    for field in ('working_directory', 'repository_path')):
-            raise ValueError('Malformed project registry directory fields: ' + key)
+            raise GateRefusal('Malformed project registry directory fields: ' + key)
         projects[key] = entry
     return projects
 
@@ -134,20 +169,20 @@ def _target(root, task_path):
     path = _safe(root, task_path)
     relative = path.relative_to(root)
     if len(relative.parts) != 3 or relative.parts[0] != 'tasks' or path.suffix != '.json' or not _uuid(path.stem):
-        raise ValueError('Target must be tasks/<registered-project>/<canonical-UUID>.json')
+        raise GateRefusal('Target must be tasks/<registered-project>/<canonical-UUID>.json')
     task = _read(root, path)
     if not isinstance(task, dict) or task.get('id') != path.stem or task.get('project') != relative.parts[1]:
-        raise ValueError('Task filename, ID and project must agree')
+        raise GateRefusal('Task filename, ID and project must agree')
     registry = _registry(root)
     if task['project'] not in registry:
-        raise ValueError('Task project must have exactly one registry entry')
+        raise GateRefusal('Task project must have exactly one registry entry')
     identities = []
     for candidate in root.glob('tasks/*/*.json'):
         data = _read(root, candidate)
         if isinstance(data, dict) and data.get('id') == task['id']:
             identities.append(candidate)
     if len(identities) != 1:
-        raise ValueError('Duplicate task identity')
+        raise GateRefusal('Duplicate task identity')
     return task, str(relative), registry[task['project']]
 
 
@@ -164,15 +199,18 @@ def _raw_dependencies(root):
         identity = data.get('id', path.stem)
         if isinstance(identity, str):
             if identity in task_ids:
-                raise ValueError('Duplicate task identity in authoritative inputs: ' + identity)
+                raise GateRefusal('Duplicate task identity in authoritative inputs: ' + identity)
             task_ids.add(identity)
         if 'depends_on' in data and not _list_of_strings(data['depends_on']):
-            raise ValueError('Malformed depends_on declaration: ' + str(path.relative_to(root)))
+            raise GateRefusal('Malformed depends_on declaration: ' + str(path.relative_to(root)))
         for field in ('issue_key', 'epic_key'):
             if data.get(field) is not None and (not isinstance(data[field], str) or not data[field].strip()):
-                raise ValueError('Malformed task ownership ' + field + ': ' + str(path.relative_to(root)))
+                raise GateRefusal('Malformed task ownership ' + field + ': ' + str(path.relative_to(root)))
         if 'issue_keys' in data and not _list_of_strings(data['issue_keys']):
-            raise ValueError('Malformed task ownership issue_keys: ' + str(path.relative_to(root)))
+            raise GateRefusal('Malformed task ownership issue_keys: ' + str(path.relative_to(root)))
+    for path in root.glob('epics/*/scope.json'):
+        if not isinstance(_read(root, path), dict):
+            raise GateRefusal('Malformed scope record: ' + str(path.relative_to(root)))
     for path in root.glob('epics/*/issues.json'):
         data = _read(root, path)
         if isinstance(data, dict):
@@ -184,15 +222,15 @@ def _raw_dependencies(root):
                 parent_key = issue.get('parent_key')
                 parent = issue.get('parent')
                 if parent_key is not None and (not isinstance(parent_key, str) or not parent_key.strip()):
-                    raise ValueError('Malformed issue parent_key: ' + str(path.relative_to(root)))
+                    raise GateRefusal('Malformed issue parent_key: ' + str(path.relative_to(root)))
                 if parent is not None:
                     if not isinstance(parent, dict) or not isinstance(parent.get('key'), str) or not parent['key'].strip():
-                        raise ValueError('Malformed issue parent.key: ' + str(path.relative_to(root)))
+                        raise GateRefusal('Malformed issue parent.key: ' + str(path.relative_to(root)))
                     if parent_key is not None and parent_key != parent['key']:
-                        raise ValueError('Conflicting issue parent declarations: ' + str(path.relative_to(root)))
+                        raise GateRefusal('Conflicting issue parent declarations: ' + str(path.relative_to(root)))
                 for field in ('depends_on', 'dependencies'):
                     if field in issue and not _list_of_strings(issue[field]):
-                        raise ValueError('Malformed ' + field + ' declaration: ' + str(path.relative_to(root)))
+                        raise GateRefusal('Malformed ' + field + ' declaration: ' + str(path.relative_to(root)))
 
 
 # Fields that never decide eligibility: linked task lists (bound through the graph), edit times and the
@@ -380,7 +418,7 @@ def evaluate(root, task_path):
         return _eligible(canonical_root, task_path)
     except (ValueError, OSError, TypeError, KeyError, RecursionError) as exc:
         result = _base('check', root)
-        result.update(reasons=[str(exc)], input_error=True)
+        result.update(reasons=[_reason(exc)], input_error=True)
         # Preserve the requested task binding even when another source was malformed.
         try:
             canonical_root = _root(root)
@@ -425,10 +463,10 @@ def _audit(root, result, identifier=None):
 
 def _worker(root, endpoint, project):
     if not isinstance(endpoint, str) or not endpoint.strip():
-        raise ValueError('An exact worker endpoint is required')
+        raise GateRefusal('An exact worker endpoint is required')
     registry = _registry(root)
     if project not in registry:
-        raise ValueError('Worker project is not registered')
+        raise GateRefusal('Worker project is not registered')
     project_record = registry[project]
     registrations = []
     for path in root.glob('sessions/*.json'):
@@ -441,7 +479,7 @@ def _worker(root, endpoint, project):
                     ('role', 'project', 'session_id', 'agent_id',
                      'working_directory', 'startup_working_directory')})
     if not registrations:
-        raise ValueError('Worker endpoint is not self-registered for this exact project/directory')
+        raise GateRefusal('Worker endpoint is not self-registered for this exact project/directory')
     return _hash(sorted(registrations, key=lambda value: _canonical(value)))
 
 
@@ -454,23 +492,23 @@ def _validate(root, message_path, endpoint):
     path = _safe(root, message_path)
     relative = path.relative_to(root)
     if len(relative.parts) != 3 or relative.parts[0] != 'inbox' or path.suffix != '.json' or not _uuid(path.stem):
-        raise ValueError('Worker validates an existing UUID inbox envelope only; archived requests cannot execute')
+        raise GateRefusal('Worker validates an existing UUID inbox envelope only; archived requests cannot execute')
     if _paths_with_message(root, path.stem) != [path]:
-        raise ValueError('Message UUID is archived or duplicated; only its single original inbox location can execute')
+        raise GateRefusal('Message UUID is archived or duplicated; only its single original inbox location can execute')
     message = _read(root, path)
     if not isinstance(message, dict) or message.get('schema_version') != SCHEMA_VERSION or message.get('type') != 'execution_request' or message.get('id') != path.stem:
-        raise ValueError('Unsupported or mismatched execution envelope')
+        raise GateRefusal('Unsupported or mismatched execution envelope')
     receipt_path = message.get('receipt_path')
     if not isinstance(receipt_path, str):
-        raise ValueError('Execution envelope has no dispatch receipt')
+        raise GateRefusal('Execution envelope has no dispatch receipt')
     receipt = _read(root, receipt_path)
     if not isinstance(receipt, dict) or receipt.get('schema_version') != SCHEMA_VERSION or receipt.get('operation') != 'dispatch' or receipt.get('allowed') is not True:
-        raise ValueError('Only an allowed dispatch receipt can authorize a request')
+        raise GateRefusal('Only an allowed dispatch receipt can authorize a request')
     if not _uuid(receipt.get('id')):
-        raise ValueError('Dispatch receipt ID must be a canonical UUID')
+        raise GateRefusal('Dispatch receipt ID must be a canonical UUID')
     expected_receipt = 'dispatch-gates/' + str(message.get('task_id')) + '/' + str(receipt.get('id')) + '.json'
     if receipt_path != expected_receipt or receipt.get('audit_path') != receipt_path:
-        raise ValueError('Receipt path/identity mismatch')
+        raise GateRefusal('Receipt path/identity mismatch')
     decision = evaluate(root, message.get('task_path', ''))
     result.update(decision, operation='validate', endpoint=endpoint, message_id=message['id'], message_path=str(relative))
     checks = dict(root=str(root), task_id=decision.get('task_id'), task_path=decision.get('task_path'),
@@ -499,11 +537,11 @@ def validate(root, message_path, endpoint):
         result = _validate(root, message_path, endpoint)
     except (ValueError, OSError, TypeError, KeyError, StopIteration, RecursionError) as exc:
         result = _base('validate', root)
-        result.update(reasons=[str(exc)], endpoint=endpoint, input_error=True)
+        result.update(reasons=[_reason(exc)], endpoint=endpoint, input_error=True)
     try:
         return _audit(_root(root), result)
     except (ValueError, OSError, TypeError) as exc:
-        result.update(allowed=False, input_error=True, reasons=result['reasons'] + ['Audit publication failed: ' + str(exc)])
+        result.update(allowed=False, input_error=True, reasons=result['reasons'] + ['Audit publication failed: ' + _reason(exc)])
         return result
 
 
@@ -515,7 +553,7 @@ def dispatch(root, task_path, endpoint, message_id=None):
     try:
         root = _root(root)
         if not _uuid(result['message_id']):
-            raise ValueError('Message ID must be a canonical UUID')
+            raise GateRefusal('Message ID must be a canonical UUID')
         if not result['allowed']:
             return _audit(root, result)
         result['worker_fingerprint'] = _worker(root, endpoint, result['project'])
@@ -525,14 +563,14 @@ def dispatch(root, task_path, endpoint, message_id=None):
             lock.mkdir()
         except FileExistsError:
             lock = None
-            raise ValueError('Task dispatch is already being serialized')
+            raise GateRefusal('Task dispatch is already being serialized')
         previous = _paths_with_message(root, result['message_id'])
         if previous:
             if len(previous) != 1 or previous[0].relative_to(root).parts[0] != 'inbox':
-                raise ValueError('Message ID was already archived or has conflicting bindings; never republish')
+                raise GateRefusal('Message ID was already archived or has conflicting bindings; never republish')
             checked = _validate(root, previous[0], endpoint)
             if not checked['allowed'] or checked['task_id'] != result['task_id']:
-                raise ValueError('Existing message UUID is stale, tampered or bound to another task/worker')
+                raise GateRefusal('Existing message UUID is stale, tampered or bound to another task/worker')
             return _audit(root, dict(result, message_path=str(previous[0].relative_to(root)),
                                      receipt_path=_read(root, previous[0])['receipt_path'], idempotent=True))
         for path in root.glob('inbox/*/*.json'):
@@ -540,7 +578,7 @@ def dispatch(root, task_path, endpoint, message_id=None):
             if isinstance(message, dict) and message.get('type') == 'execution_request' and message.get('task_id') == result['task_id']:
                 receipt = _read(root, message.get('receipt_path', ''))
                 if isinstance(receipt, dict) and receipt.get('fingerprint') == result['fingerprint'] and receipt.get('allowed') is True:
-                    raise ValueError('Task has an outstanding fresh execution envelope: ' + str(path.relative_to(root)))
+                    raise GateRefusal('Task has an outstanding fresh execution envelope: ' + str(path.relative_to(root)))
         receipt_id = str(uuid.uuid4())
         receipt_path = str(Path('dispatch-gates') / result['task_id'] / (receipt_id + '.json'))
         message_path = str(Path('inbox') / result['project'] / (result['message_id'] + '.json'))
@@ -552,21 +590,21 @@ def dispatch(root, task_path, endpoint, message_id=None):
         result.update(message_path=message_path, message_hash=_hash(message))
         current = evaluate(root, task_path)
         if not current['allowed'] or current['fingerprint'] != result['fingerprint']:
-            raise ValueError('Authoritative input changed before receipt publication')
+            raise GateRefusal('Authoritative input changed before receipt publication')
         receipt = _audit(root, result, receipt_id)
         current = evaluate(root, task_path)
         if not current['allowed'] or current['fingerprint'] != result['fingerprint']:
-            raise ValueError('Authoritative input changed before inbox publication; receipt alone cannot execute')
+            raise GateRefusal('Authoritative input changed before inbox publication; receipt alone cannot execute')
         if _worker(root, endpoint, result['project']) != result['worker_fingerprint']:
-            raise ValueError('Worker registration changed before inbox publication')
+            raise GateRefusal('Worker registration changed before inbox publication')
         _publish(root, message_path, message)
         return receipt
     except (ValueError, OSError, TypeError, KeyError, StopIteration, RecursionError) as exc:
-        result.update(allowed=False, input_error=True, reasons=result['reasons'] + [str(exc)])
+        result.update(allowed=False, input_error=True, reasons=result['reasons'] + [_reason(exc)])
         try:
             return _audit(_root(root), result)
         except (ValueError, OSError, TypeError) as audit_error:
-            result['reasons'].append('Audit publication failed: ' + str(audit_error))
+            result['reasons'].append('Audit publication failed: ' + _reason(audit_error))
             return result
     finally:
         if lock is not None:
@@ -575,7 +613,7 @@ def dispatch(root, task_path, endpoint, message_id=None):
 
 class _Parser(argparse.ArgumentParser):
     def error(self, message):
-        raise ValueError(message)
+        raise GateRefusal(message)
 
 
 def main(argv=None):
@@ -598,7 +636,7 @@ def main(argv=None):
         else:
             result = validate(args.root, args.message, args.worker_id)
     except (ValueError, OSError, TypeError) as exc:
-        result = dict(_base('error'), input_error=True, reasons=[str(exc)])
+        result = dict(_base('error'), input_error=True, reasons=[_reason(exc)])
     print(json.dumps(result, sort_keys=True))
     return 0 if result['allowed'] else 1 if result.get('input_error') else 2
 

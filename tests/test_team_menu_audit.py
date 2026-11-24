@@ -1,6 +1,7 @@
 """Regression checks for registry paths, native terminal arrival and team management."""
 import contextlib
 import curses
+import hashlib
 import io
 import json
 import os
@@ -138,6 +139,130 @@ class TeamMenuAuditTests(unittest.TestCase):
                 self.data.add_project(root, project, 'sample')
             self.assertEqual(self.data.add_project(root, moved, 'sample'), 'sample')
             self.assertEqual(self.data.removal_snapshot(root, 'sample')['working_directory'], str(moved))
+
+    def _readd_after_removal(self, root, project):
+        with (patch.object(self.data, 'managed_team', return_value=None),
+              patch.object(self.data, '_unidentified_team', return_value=False)):
+            self.data.add_project(root, project, 'sample')
+            self.data.remove_project(root, 'sample', self.data.removal_snapshot(root, 'sample'))
+            self.assertEqual(self.data.add_project(root, project, 'sample'), 'sample')
+
+    def test_removing_a_readded_project_succeeds_after_its_folder_was_deleted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / 'project'
+            project.mkdir()
+            (root / 'projects.json').write_text('[]')
+            self._readd_after_removal(root, project)
+            shutil.rmtree(project)
+            with (patch.object(self.data, 'managed_team', return_value=None),
+                  patch.object(self.data, '_unidentified_team', return_value=False)):
+                self.data.remove_project(root, 'sample', self.data.removal_snapshot(root, 'sample'))
+            self.assertEqual(self.data.projects(root), [])
+
+    def test_removing_a_readded_project_succeeds_after_its_folder_was_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / 'project'
+            project.mkdir()
+            (root / 'projects.json').write_text('[]')
+            self._readd_after_removal(root, project)
+            project.rename(root / 'moved')
+            project.mkdir()
+            with (patch.object(self.data, 'managed_team', return_value=None),
+                  patch.object(self.data, '_unidentified_team', return_value=False)):
+                self.data.remove_project(root, 'sample', self.data.removal_snapshot(root, 'sample'))
+            self.assertEqual(self.data.projects(root), [])
+
+    @staticmethod
+    def _marker(root, name):
+        return root / 'archive' / ('.team-route-' + hashlib.sha256(name.casefold().encode()).hexdigest())
+
+    def _remove_sample(self, root):
+        with (patch.object(self.data, 'managed_team', return_value=None),
+              patch.object(self.data, '_unidentified_team', return_value=False)):
+            self.data.remove_project(root, 'sample', self.data.removal_snapshot(root, 'sample'))
+
+    def _legacy_two_element_marker(self, root, project):
+        self.data.add_project(root, project, 'sample')
+        self._remove_sample(root)
+        marker = self._marker(root, 'sample')
+        marker.write_text(json.dumps(json.loads(marker.read_text())[:2]))
+        self.assertEqual(self.data.add_project(root, project, 'sample'), 'sample')
+
+    def test_removal_with_a_two_element_marker_succeeds_after_the_folder_vanished_or_was_replaced(self):
+        for change in ('deleted', 'replaced'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                project = root / 'project'
+                project.mkdir()
+                (root / 'projects.json').write_text('[]')
+                self._legacy_two_element_marker(root, project)
+                if change == 'deleted':
+                    shutil.rmtree(project)
+                else:
+                    project.rename(root / 'moved')
+                    project.mkdir()
+                self._remove_sample(root)
+                self.assertEqual(self.data.projects(root), [])
+
+    def test_route_bound_to_another_folder_stays_bound_after_removing_a_live_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            first = root / 'first'
+            second = root / 'second'
+            first.mkdir()
+            second.mkdir()
+            (root / 'projects.json').write_text('[]')
+            with (patch.object(self.data, 'managed_team', return_value=None),
+                  patch.object(self.data, '_unidentified_team', return_value=False)):
+                self.data.add_project(root, first, 'sample')
+                self.data.remove_project(root, 'sample', self.data.removal_snapshot(root, 'sample'))
+                marker = self._marker(root, 'sample')
+                bound = marker.read_bytes()
+                (root / 'projects.json').write_text(json.dumps([{'id': 'sample', 'working_directory': str(second)}]))
+                self.data.remove_project(root, 'sample', self.data.removal_snapshot(root, 'sample'))
+                self.assertEqual(marker.read_bytes(), bound)
+                self.assertEqual(self.data.projects(root), [])
+                with self.assertRaises(ValueError):
+                    self.data.add_project(root, second, 'sample')
+                self.assertEqual(self.data.add_project(root, first, 'sample'), 'sample')
+
+    def test_a_marker_written_by_removal_has_exactly_the_name_and_the_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / 'project'
+            project.mkdir()
+            (root / 'projects.json').write_text('[]')
+            self.data.add_project(root, project, 'sample')
+            self._remove_sample(root)
+            self.assertEqual(json.loads(self._marker(root, 'sample').read_text()),
+                             ['sample', self.data._directory_identity(project)])
+
+    def test_long_non_ascii_working_directory_can_be_removed_readded_and_removed_again(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root
+            for _ in range(6):
+                project = project / ('п' * 115)
+            project.mkdir(parents=True)
+            (root / 'projects.json').write_text('[]')
+            self.data.add_project(root, project, 'sample')
+            self._remove_sample(root)
+            self.assertEqual(self.data.add_project(root, project, 'sample'), 'sample')
+            self._remove_sample(root)
+            self.assertEqual(self.data.projects(root), [])
+
+    def test_protect_a_marker_that_is_not_a_regular_file_still_refuses_removal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / 'project'
+            project.mkdir()
+            (root / 'projects.json').write_text(json.dumps([{'id': 'sample', 'working_directory': str(project)}]))
+            self._marker(root, 'sample').mkdir(parents=True)
+            with self.assertRaises(ValueError):
+                self._remove_sample(root)
+            self.assertEqual(self.data.projects(root), ['sample'])
 
     def test_failed_retirement_publication_preserves_registry_and_can_be_retried(self):
         with tempfile.TemporaryDirectory() as directory:

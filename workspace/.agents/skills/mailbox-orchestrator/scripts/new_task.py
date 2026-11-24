@@ -10,6 +10,7 @@ blocker, so the dependency gate refuses dispatch until the orchestrator resolves
 import argparse
 import json
 import os
+import secrets
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -22,13 +23,34 @@ SKILL_DIRS = ('.agents/skills', '.claude/skills', '.github/skills')
 TITLE_LIMIT = 80
 
 
+class TaskIdentityCollision(FileExistsError):
+    """A task record with the new identity is already published."""
+
+
+def registered_projects(root):
+    try:
+        registry = json.loads((root / 'projects.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        raise ValueError('Project registry is missing, unreadable or malformed') from None
+    projects = registry.get('projects') if isinstance(registry, dict) else None
+    if not isinstance(projects, list) or not all(isinstance(entry, dict) for entry in projects):
+        raise ValueError('Project registry is a malformed registry: projects must be a list of objects')
+    return projects
+
+
 def registered_project(root, project_id):
-    projects = json.loads((root / 'projects.json').read_text())['projects']
+    projects = registered_projects(root)
     for entry in projects:
         if entry.get('id') == project_id:
-            return entry
-    known = ', '.join(entry.get('id', '?') for entry in projects)
+            return require_paths(entry)
+    known = ', '.join(str(entry.get('id', '?')) for entry in projects)
     raise ValueError(f'Unknown project {project_id!r}; registered projects: {known}')
+
+
+def require_paths(project):
+    if not all(isinstance(project.get(key), str) for key in ('repository_path', 'working_directory')):
+        raise ValueError(f'Project {project["id"]!r} lacks repository_path or working_directory in the registry')
+    return project
 
 
 def discover_loop_skills(project):
@@ -78,12 +100,27 @@ def build_task(project, text, title, loop_skills, now):
 def publish_new(path, value):
     """Write atomically and never replace an existing task file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.parent / f'.tmp-{path.name}'
-    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False) + '\n')
+    temporary = path.with_name(f'.{path.name}.{secrets.token_hex(8)}.tmp')
+    try:
+        write_synced(temporary, json.dumps(value, indent=2, ensure_ascii=False) + '\n')
+        link_without_overwriting(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_synced(path, text):
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def link_without_overwriting(temporary, path):
     try:
         os.link(temporary, path)
-    finally:
-        temporary.unlink()
+    except FileExistsError:
+        raise TaskIdentityCollision from None
 
 
 def create_task(root, project_id, text, title=None):
@@ -97,6 +134,11 @@ def create_task(root, project_id, text, title=None):
     return task, path
 
 
+def refuse(reason):
+    print(json.dumps({'created': False, 'error': reason}, ensure_ascii=False))
+    return 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--project', required=True, help='Project ID from projects.json')
@@ -107,9 +149,12 @@ def main(argv=None):
     text = sys.stdin.read() if args.text == '-' else args.text
     try:
         task, path = create_task(Path(args.root).resolve(), args.project, text, args.title)
-    except (ValueError, OSError, KeyError) as error:
-        print(json.dumps({'created': False, 'error': str(error)}, ensure_ascii=False))
-        return 1
+    except ValueError as error:
+        return refuse(str(error))
+    except TaskIdentityCollision:
+        return refuse('A task record with this identity already exists; nothing was written')
+    except OSError:
+        return refuse('The task record could not be created')
     print(json.dumps({'created': True, 'id': task['id'], 'project': task['project'],
                       'path': str(path), 'blockers': task['blockers']}, ensure_ascii=False))
     return 0
