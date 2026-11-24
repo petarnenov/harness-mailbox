@@ -7,6 +7,7 @@ from pathlib import Path
 import pty
 import runpy
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -411,3 +412,47 @@ class RuntimeAuditTests(unittest.TestCase):
                 self.assertNotEqual(current, old_session)
             finally:
                 tmux('kill-server', check=False)
+
+    @unittest.skipUnless(shutil.which('tmux'), 'requires tmux')
+    def test_team_stop_ends_agent_added_after_launch_with_its_detached_child_and_keeps_plain_windows(self):
+        detached_record = self.base / 'detached.pid'
+        for name in ('codex', 'copilot'):
+            (self.base / name).write_text('#!/bin/sh\nexec sleep 120\n')
+            (self.base / name).chmod(0o755)
+        (self.base / 'claude').write_text(
+            '#!/bin/sh\n'
+            f'setsid sh -c \'trap "" HUP; echo $$ > "{detached_record}"; exec sleep 120\' </dev/null >/dev/null 2>&1 &\n'
+            'exec sleep 120\n')
+        (self.base / 'claude').chmod(0o755)
+        self.recorded_child = None
+        self.addCleanup(self.kill_recorded_child)
+        with self.isolated_tmux() as tmux:
+            api = runpy.run_path(str(self.plugin / 'team'))
+            role = api['RoleSettings']
+            name = api['setup_team'](self.root, ['app'], role('codex', None, None), role('copilot', 'auto', None))
+            tmux('new-window', '-d', '-t', name + ':', '-n', 'added',
+                 str(self.plugin / 'start'), 'worker', 'app', '--harness', 'claude')
+            tmux('new-window', '-d', '-t', name + ':', '-n', 'plain', 'sleep', '120')
+            deadline = time.monotonic() + 5
+            while not detached_record.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(detached_record.exists(), 'the added agent never started its child')
+            detached = int(detached_record.read_text())
+            plain = int(tmux('display-message', '-p', '-t', name + ':plain', '#{pane_pid}').stdout)
+            control = runpy.run_path(str(self.plugin / 'team_control.py'))
+            self.recorded_child = (control, detached, control['read_process_table']()[detached].start)
+            control['stop_managed'](self.root, control['managed_team'](self.root))
+            windows = tmux('list-windows', '-a', '-F', '#{window_name}').stdout.split()
+            self.assertEqual(windows, ['plain'])
+            os.kill(plain, 0)
+            deadline = time.monotonic() + 2  # init may take a moment to reap the killed orphan
+            while Path(f'/proc/{detached}').exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertFalse(Path(f'/proc/{detached}').exists())
+
+    def kill_recorded_child(self):
+        # Signal only through the start-time guard so a reused pid is never killed.
+        if self.recorded_child is None:
+            return
+        control, pid, start = self.recorded_child
+        control['send_signals']({pid: start}, signal.SIGKILL)

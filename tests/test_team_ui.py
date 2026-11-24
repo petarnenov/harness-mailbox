@@ -533,6 +533,58 @@ for message in [
             self.assertTrue(any('Confirm stop' in frame for frame in screen.frames))
             stop.assert_called_once_with(self.root, state, role=None)
 
+    def confirm_team_stop_frames(self, state):
+        keys = [curses.KEY_DOWN] * (len(state['projects']) + 1) + [10, ord('q')]
+        with patch.object(self.data, 'stop_managed'):
+            screen, _, _ = self.screen_session(keys, active=state)
+        return [frame for frame in screen.frames if 'Confirm stop' in frame]
+
+    def test_team_stop_confirmation_lists_agent_windows_by_label_or_pane_id(self):
+        state = snapshot('alpha', 'beta')
+        state['agents'] = {'%30': '$1|100|123|300|300', '%31': '$1|100|123|310|310'}
+        state['agent_windows'] = {'%30': 'added'}
+        state['foreign'] = False
+        frame = self.confirm_team_stop_frames(state)[-1]
+        self.assertIn('Agent window · added', frame)
+        self.assertIn('Agent window · %31', frame)
+        self.assertNotIn('Other tmux windows will stay open.', frame)
+
+    def test_team_stop_confirmation_lists_each_agent_window_label_once_in_first_seen_order(self):
+        state = snapshot('alpha')
+        state['agents'] = {'%30': '$1|100|123|300|300', '%31': '$1|100|123|310|310',
+                           '%32': '$1|100|123|320|320', '%33': '$1|100|123|330|330'}
+        state['agent_windows'] = {'%30': 'zeta', '%31': 'alpha', '%32': 'zeta', '%33': 'beta'}
+        state['foreign'] = False
+        frame = self.confirm_team_stop_frames(state)[-1]
+        self.assertEqual(frame.count('Agent window · zeta'), 1)
+        self.assertEqual(frame.count('Agent window · alpha'), 1)
+        self.assertEqual(frame.count('Agent window · beta'), 1)
+        self.assertLess(frame.index('Agent window · zeta'), frame.index('Agent window · alpha'))
+        self.assertLess(frame.index('Agent window · alpha'), frame.index('Agent window · beta'))
+
+    def test_team_stop_confirmation_mentions_other_windows_only_when_foreign(self):
+        state = snapshot('alpha')
+        self.assertNotIn('Other tmux windows', self.confirm_team_stop_frames(state)[-1])
+        state['foreign'] = True
+        frame = self.confirm_team_stop_frames(state)[-1]
+        self.assertIn('Other tmux windows will stay open.', frame)
+        self.assertNotIn('Agent window', frame)
+
+    def test_failed_team_stop_shows_the_fixed_text_and_refreshes_the_team(self):
+        state = snapshot('alpha', 'beta')
+        keys = [curses.KEY_DOWN] * 3 + [10, curses.KEY_DOWN, 10, ord('q')]
+        screen = TerminalScreen(keys, (28, 110))
+        failure = ValueError('Some team processes did not stop: pid 4242 /home/private')
+        with (patch.object(self.data, 'managed_team', side_effect=[state, state]) as refresh,
+              patch.object(self.data, 'stop_managed', side_effect=failure) as stop,
+              patch.object(self.data, 'models', return_value={}),
+              patch('curses.has_colors', return_value=False), patch('curses.curs_set')):
+            self.ui['run_ui'](screen, self.root)
+        stop.assert_called_once_with(self.root, state, role=None)
+        self.assertEqual(refresh.call_count, 2)
+        self.assertIn('Stop failed. Refresh the team and retry.', screen.frames[-1])
+        self.assertFalse(any('4242' in frame or '/home/private' in frame for frame in screen.frames))
+
     def test_left_keeps_home_menu_and_highlight_until_explicit_quit(self):
         left = curses.KEY_LEFT
         for active, extra, selected_row in (

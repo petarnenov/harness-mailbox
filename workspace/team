@@ -124,6 +124,10 @@ class Wizard:
                 for role in self.active["panes"]:
                     label = "Orchestrator" if role == "orchestrator" else "Worker · " + self.worker_label(role)
                     rows.append(("detail", label))
+                windows = self.active.get("agent_windows", {})
+                labels = dict.fromkeys("Agent window · " + (windows.get(pane) or pane)
+                                       for pane in self.active.get("agents", {}))
+                rows.extend(("detail", label) for label in labels)
                 if self.active.get("foreign"):
                     rows.append(("detail", "Other tmux windows will stay open."))
             return rows
