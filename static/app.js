@@ -310,6 +310,58 @@ function graphIdentity(n) {
  return {identity:n.label||n.id,title:n.detail||kind,association:(n.epic_keys||[]).length?'Epic scope: '+n.epic_keys.join(', '):n.kind==='project'?'Project grouping':'No Epic mapping recorded',kind};
 }
 function graphRecordLabel(n) {const info=graphIdentity(n);return info.identity+(n.kind==='task'?' · '+info.title:'');}
+function blockingRecordOwner(record) {
+ const text=value=>typeof value==='string'?value.trim():'';
+ const delivery=record?.delivery;
+ if(delivery){
+  const roles=delivery.ownership,owners=[];
+  for(const [key,label] of [['jira','Jira assignee'],['implementation','Implementation owner'],['execution','Execution owner']]){
+   const role=roles?.[key];
+   if(role?.status==='assigned'&&text(role.name))owners.push(label+': '+role.name.trim());
+   if(role?.status==='conflict')owners.push(label+': conflicting records');
+  }
+  if(owners.length)return owners.join(' · ');
+  if(text(delivery.owner))return 'Recorded local owner: '+delivery.owner.trim();
+ } else if(record){
+  const owner=record.owner,session=text(record.owner_session_id);
+  const name=[owner,owner?.display_name,owner?.displayName,owner?.name,owner?.session_id,owner?.agent_id].map(text).find(Boolean);
+  const identity=text(owner?.session_id)||text(owner?.agent_id)||name;
+  if((owner!=null&&!name)||(record.owner_session_id!=null&&!session)||(identity&&session&&identity!==session))return 'Blocking owner: conflicting records';
+  if(name||session)return 'Recorded owner: '+(name||session);
+ }
+ return 'Blocking owner not recorded';
+}
+function graphBlockerSummary(node,record,unmet,nodes,records) {
+ const delivery=record?.delivery;
+ const reasons=delivery?.blockers||record?.blockers;
+ const lines=new Set();
+ function addRecord(id,why){
+  if(records.get(id)===null){
+   lines.add(why+' — '+id+' · Blocking owner unknown (duplicate task ID)');
+   return;
+  }
+  const blocker=nodes.get(id);
+  const title=blocker?.detail||blocker?.label;
+  const label=title&&title!==id&&title!==id.slice(id.indexOf(':')+1)?id+' · '+title:id;
+  lines.add(why+' — '+label+' · '+blockingRecordOwner(records.get(id)));
+ }
+ const direct=new Set(unmet.map(edge=>edge.from));
+ if(!node.ready)for(const edge of unmet)addRecord(edge.from,'Awaiting prerequisite'+(edge.condition?' ('+edge.condition+')':''));
+ for(const reason of Array.isArray(reasons)?reasons:[]){
+  if(typeof reason!=='string'||!reason.trim())continue;
+  const dependency=/^(Unmet prerequisite|Dependency cycle): (.+)$/.exec(reason);
+  const localTask=/^Local task (.+) is blocked\.$/.exec(reason);
+  if(dependency){
+   if(dependency[1]!=='Unmet prerequisite'||!direct.has(dependency[2]))addRecord(dependency[2],dependency[1]);
+  } else if(localTask){
+   addRecord('task:'+localTask[1],'Linked task is blocked');
+  } else if(reason!=='Recorded issue status is blocked.'){
+   lines.add(reason+' · Blocking owner not recorded');
+  }
+ }
+ if(!lines.size&&(node.status==='blocked'||delivery?.blocked))lines.add('Reason not recorded · Blocking owner not recorded');
+ return lines.size?'Blocked\n'+[...lines].join('\n')+'\n\n':'';
+}
 function localWorkGroups(graph,s) {
  const selected=new Set(s.tasks.map(t=>'task:'+t.id)),owners=new Map([...s.issues.map(i=>[i.key,i]),...s.epics.map(e=>[e.key,e])]);
  const groups={history:[],current:[],audit:[]};
@@ -360,9 +412,17 @@ function renderMap(s) {
    if(e.kind==='requires')line.setAttribute('marker-end',`url(#${cyclic?'graph-cycle':met?'graph-arrow':'graph-unmet'})`);svg.append(line);
   });
   const ranks=new Set([...layout.positions.values()].map(p=>p.x));[...ranks].sort((a,b)=>a-b).forEach((x,i)=>svg.append(svgEl('text',{x,y:25,class:'lane'},`${mode==='hierarchy'?'LEVEL':'STEP'} ${i+1}`)));
+  const allNodes=new Map(data.graph.nodes.map(node=>[node.id,node]));
+  const allRecords=new Map(data.issues.map(issue=>['issue:'+issue.key,issue]));
+  for(const task of data.tasks){
+   const id='task:'+task.id;
+   allRecords.set(id,allRecords.has(id)?null:task);
+  }
   drawing.forEach(n=>{const p=layout.positions.get(n.id),g=svgEl('g',{'data-node-id':n.id,'data-boundary':String(n.boundary)});
-   const info=graphIdentity(n),unmet=data.graph.edges.filter(e=>e.kind==='requires'&&e.to===n.id&&!data.graph.nodes.find(x=>x.id===e.from)?.ready).length,issue=n.kind==='issue'?data.issues.find(i=>'issue:'+i.key===n.id):null,marker=graphMarker(n,unmet,issue?stageMarker(issue):null);
-   g.append(svgEl('title',{},`${info.identity} — ${info.title} · ${info.kind} · ${info.association} · Full record: ${n.label}${n.detail?' — '+n.detail:''} · ${n.id} · ${graphCompletion(n)}${n.boundary?' · outside selection context':''}`));
+   const pending=data.graph.edges.filter(edge=>edge.kind==='requires'&&edge.to===n.id&&!allNodes.get(edge.from)?.ready);
+   const info=graphIdentity(n),unmet=pending.length,record=allRecords.get(n.id),issue=n.kind==='issue'?record:null,marker=graphMarker(n,unmet,issue?stageMarker(issue):null);
+   const summary=graphBlockerSummary(n,record,pending,allNodes,allRecords);
+   g.append(svgEl('title',{},summary+`${info.identity} — ${info.title} · ${info.kind} · ${info.association} · Full record: ${n.label}${n.detail?' — '+n.detail:''} · ${n.id} · ${graphCompletion(n)}${n.boundary?' · outside selection context':''}`));
    g.append(svgEl('rect',{x:p.x,y:p.y,width:245,height:150,rx:7,stroke:n.ready?'#8ecab5':'#d5e0ec',fill:'#fff','stroke-dasharray':n.boundary||n.unresolved?'4 3':'none'}));
    g.append(svgEl('text',{x:p.x+10,y:p.y+19,'font-weight':600},String(info.identity).slice(0,34)),svgEl('text',{x:p.x+10,y:p.y+38},String(info.title).slice(0,34)),svgEl('text',{x:p.x+10,y:p.y+57,'font-size':10},`${info.kind}${n.boundary?' · context':''}${n.unresolved?' · unresolved':''} · ${info.association}`.slice(0,46)),svgEl('text',{x:p.x+10,y:p.y+75,'font-size':11,'font-weight':600,class:'node-time'},issue?`Estimate ${recordedHours(issue.original_estimate_hours,'—')} · Worked ${recordedHours(issue.worked_hours,'—')}`:''));
    const badge=svgEl('g',{class:'graph-marker marker-'+marker.kind,'data-marker':marker.kind});badge.append(svgEl('rect',{x:p.x+9,y:p.y+84,width:225,height:22,rx:4}),svgEl('text',{x:p.x+16,y:p.y+99,'font-size':11,'font-weight':600},marker.label));g.append(badge);

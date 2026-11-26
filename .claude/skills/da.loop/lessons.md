@@ -47,6 +47,7 @@ One row per completed run. Numbers come from the run log, never from estimates.
 | 2026-11-24 | `orchestrator-bar.md` | MEDIUM | da.loop@2026-11-23.1 | 4, max parallel 2 | 1 | 0 | reconnect fixed | 0 | unavailable | unavailable | 0 / 0 / 0 / 0 | 0 |
 | 2026-11-24 | `team-stop-all-agents.md` | HIGH | da.loop@2026-11-23.1 | 7, max parallel 1 | 2 | 0 | spec BLOCK x2 then PASS; G2 PASS, 2 SHOULD_FIX fixed | 0 | unavailable | 3240s | 0 / 0 / 0 / 0 | 1 |
 | 2026-11-24 | `team-stop-review-fixes.md` | HIGH | da.loop@2026-11-23.1 | 5, max parallel 1 | 1 | 0 | spec BLOCK then PASS; G2 PASS, 0 SHOULD_FIX | 0 | unavailable | 1760s | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-26 | `dependency-card-hover.md` | MEDIUM | da.loop@2026-11-23.1 | 7, max parallel 2 | 1 | 0 | 0 unresolved | 0 | unavailable | 335s | 0 / 0 / 0 / 0 | 1 |
 
 ## Lessons
 

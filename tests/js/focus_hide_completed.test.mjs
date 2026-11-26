@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
 
-const APP_SOURCE = readFileSync(new URL('../../static/app.js', import.meta.url), 'utf8');
+const APP_URL = new URL('../../static/app.js', import.meta.url);
+const APP_SOURCE = readFileSync(APP_URL, 'utf8');
 const LONG_AGO = '2020-01-01T00:00:00Z';
 
 // app.js wires the page while it loads; every DOM lookup resolves to this inert element.
@@ -35,7 +36,7 @@ function loadDashboard(dashboardData) {
     URL,
     URLSearchParams,
   });
-  vm.runInContext(APP_SOURCE, context);
+  vm.runInContext(APP_SOURCE, context, { filename: APP_URL.href });
   vm.runInContext(`data = ${JSON.stringify(dashboardData)}`, context);
   return context;
 }

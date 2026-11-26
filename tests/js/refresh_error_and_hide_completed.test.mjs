@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
 
-const APP_SOURCE = readFileSync(new URL('../../static/app.js', import.meta.url), 'utf8');
+const APP_URL = new URL('../../static/app.js', import.meta.url);
+const APP_SOURCE = readFileSync(APP_URL, 'utf8');
 const LONG_AGO = '2020-01-01T00:00:00Z';
 const MOUNT_HINT = 'Check the mailbox mount and try again.';
 const LAST_SNAPSHOT_NOTICE = 'Last successful snapshot is still displayed.';
@@ -20,6 +21,7 @@ class StubNode {
     this.dataset = {};
     this.style = {};
     this.attributes = new Map();
+    this.listeners = new Map();
     this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false };
     this.page = page;
   }
@@ -37,7 +39,7 @@ class StubNode {
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
   getAttribute(name) { return this.attributes.get(name); }
   removeAttribute(name) { this.attributes.delete(name); }
-  addEventListener() {}
+  addEventListener(type, callback) { this.listeners.set(type, callback); }
   focus() {}
   showModal() {}
   close() {}
@@ -78,7 +80,7 @@ class StubPage {
       URL,
       URLSearchParams,
     });
-    vm.runInContext(APP_SOURCE, this.context);
+    vm.runInContext(APP_SOURCE, this.context, { filename: APP_URL.href });
   }
 
   element(id) {
@@ -388,4 +390,102 @@ test('a stored version 3 baseline is replaced by a new baseline without Added ro
   assert.equal(page.evaluate('comparison.changes.length'), 0);
   assert.equal(snapshotOf(page).version, 4);
   assert.doesNotMatch(page.textOf('changes-since-view'), /Added/);
+});
+
+function graphCard(page, id) {
+  const card = page.element('map').descendants().find(node => node.getAttribute('data-node-id') === id);
+  assert.ok(card, 'Expected dependency card ' + id);
+  return card;
+}
+
+function cardTitle(card) {
+  return card.children.find(node => node.tagName === 'title').textContent;
+}
+
+test('hover identifies the unmet prerequisite outside the search and its owner; clicking still opens the dependent', async () => {
+  const dependent = issue('ALPHA-7', { delivery: { blocked: true, blockers: ['Awaiting contract approval'], owner: 'Dependent worker' } });
+  const pending = freeTextTask('contract-task', 'Publish contract', { owner: 'Ada' });
+  const complete = freeTextTask('finished-task', 'Old prerequisite', { status: 'done', evidenced: true, owner: 'Bob' });
+  const payload = dashboardPayload({
+    issues: [dependent], tasks: [pending, complete],
+    graphNodes: [issueNode(dependent), taskNode(pending), { ...taskNode(complete), ready: true }],
+  });
+  payload.graph.edges = [pending, complete].map(task => ({ kind: 'requires', from: 'task:' + task.id, to: 'issue:ALPHA-7' }));
+  const page = new StubPage();
+  page.search('ALPHA-7');
+  page.respondWithPayload(payload);
+  await page.refresh();
+
+  const card = graphCard(page, 'issue:ALPHA-7');
+  const title = cardTitle(card);
+  assert.match(title, /Awaiting contract approval/);
+  assert.match(title, /Publish contract/);
+  assert.match(title, /Ada/);
+  assert.doesNotMatch(title, /Old prerequisite|Bob|Dependent worker/);
+  assert.match(title, /Full record: ALPHA-7/);
+  card.listeners.get('click')();
+  assert.equal(page.element('issue-detail').dataset.issueKey, 'ALPHA-7');
+  assert.match(page.textOf('issue-detail-body'), /Awaiting contract approval/);
+});
+
+test('blocked task hover shows its recorded reason and makes missing blocker ownership explicit', async () => {
+  const task = freeTextTask('schema-task', 'Import schema', { status: 'blocked', blockers: ['Schema file missing'] });
+  const page = await pageWithSnapshot(dashboardPayload({ tasks: [task], graphNodes: [taskNode(task)] }));
+  const title = cardTitle(graphCard(page, 'task:schema-task'));
+  assert.match(title, /Schema file missing/);
+  assert.match(title, /(?:unknown|unavailable|not recorded|not specified)/i);
+});
+
+test('status-only blocked task hover discloses the missing reason; an open sibling keeps its normal hover', async () => {
+  const blocked = freeTextTask('waiting', 'Wait for input', { status: 'blocked' });
+  const open = freeTextTask('available', 'Prepare notes');
+  const tasks = [blocked, open];
+  const page = await pageWithSnapshot(dashboardPayload({ tasks, graphNodes: tasks.map(task => taskNode(task)) }));
+  const blockedTitle = cardTitle(graphCard(page, 'task:waiting'));
+  assert.match(blockedTitle, /blocked/i);
+  assert.match(blockedTitle, /(?:not recorded|no .*reason|unknown|unspecified)/i);
+  const openTitle = cardTitle(graphCard(page, 'task:available'));
+  assert.match(openTitle, /Prepare notes/);
+  assert.doesNotMatch(openTitle, /blocked|blocker/i);
+});
+
+test('inherited issue prerequisite is identified with its assignee even without a direct edge on the card', async () => {
+  const dependent = issue('ALPHA-8', { delivery: { blocked: true, blockers: ['Unmet prerequisite: issue:ALPHA-2'] } });
+  const prerequisite = issue('ALPHA-2', { delivery: { ownership: { jira: { status: 'assigned', name: 'Kim' } } } });
+  const payload = dashboardPayload({ issues: [dependent, prerequisite], graphNodes: [issueNode(dependent), issueNode(prerequisite)] });
+  const page = new StubPage();
+  page.element('graph-hierarchy').setAttribute('aria-pressed', 'true');
+  page.search('ALPHA-8');
+  page.respondWithPayload(payload);
+  await page.refresh();
+
+  const title = cardTitle(graphCard(page, 'issue:ALPHA-8'));
+  assert.match(title, /ALPHA-2/);
+  assert.match(title, /Kim/);
+});
+
+test('verified dependent keeps its completion tooltip when an incoming prerequisite remains unfinished', async () => {
+  const dependent = issue('ALPHA-9', { verified: true, verified_at: LONG_AGO });
+  const pending = freeTextTask('pending-task', 'Pending task', { owner: 'Ada' });
+  const payload = dashboardPayload({ issues: [dependent], tasks: [pending], graphNodes: [issueNode(dependent), taskNode(pending)] });
+  payload.graph.edges = [{ kind: 'requires', from: 'task:pending-task', to: 'issue:ALPHA-9' }];
+  const page = await pageWithSnapshot(payload);
+
+  const title = cardTitle(graphCard(page, 'issue:ALPHA-9'));
+  assert.match(title, /Verified complete/);
+  assert.doesNotMatch(title, /blocked|awaiting prerequisite|Ada/i);
+});
+
+test('duplicate prerequisite task IDs with conflicting owners cannot attribute the blocker to either owner', async () => {
+  const dependent = issue('ALPHA-10');
+  const first = freeTextTask('shared-task', 'Prepare contract', { owner: 'Ada' });
+  const second = freeTextTask('shared-task', 'Prepare contract', { owner: 'Bob', project: 'beta' });
+  const payload = dashboardPayload({ issues: [dependent], tasks: [first, second], graphNodes: [issueNode(dependent), taskNode(first)] });
+  payload.graph.edges = [{ kind: 'requires', from: 'task:shared-task', to: 'issue:ALPHA-10' }];
+  const page = await pageWithSnapshot(payload);
+
+  const title = cardTitle(graphCard(page, 'issue:ALPHA-10'));
+  assert.match(title, /shared-task/);
+  assert.match(title, /conflict|ambiguous|not recorded|unknown/i);
+  assert.doesNotMatch(title, /Ada|Bob/);
 });
