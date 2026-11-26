@@ -369,7 +369,7 @@ test('the installed entrypoint joins its session, uses its SDK identity and reje
   }`;
   const asModule = source => `data:text/javascript,${encodeURIComponent(source)}`;
   const testLoader = asModule(`export function resolve(id, context, next) {
-    if (id === '@microsoft/copilot-sdk/extension') return { shortCircuit: true, url: ${JSON.stringify(asModule(sdk))} };
+    if (id === '@github/copilot-sdk/extension') return { shortCircuit: true, url: ${JSON.stringify(asModule(sdk))} };
     return next(id, context);
   }`);
   const preload = asModule(`import {register} from 'node:module'; register(${JSON.stringify(testLoader)});`);

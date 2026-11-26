@@ -1,5 +1,5 @@
 import { realpath } from 'node:fs/promises';
-import { joinSession } from '@microsoft/copilot-sdk/extension';
+import { joinSession } from '@github/copilot-sdk/extension';
 import { createOfferPublisher, createRelay } from './transport.mjs';
 
 try {
