@@ -5,10 +5,10 @@ Usage:
   jira_sync.py [--root <mailbox>] queue --issue <KEY> --event start|pr|verified|worklog|estimate [--ref <text>]
                                       [--hours <person-hours, estimate only>]
                                       [--in-progress-at <ISO time from the Jira history>]
-                                      [--transcripts <folder of Claude Code session transcripts>]
+                                      [--transcripts <folder of Claude Code session transcripts, replacing the default Claude folder and skipping Copilot and Codex>]
   jira_sync.py [--root <mailbox>] pending
   jira_sync.py [--root <mailbox>] done --id <UUID> --outcome applied|skipped --detail <text>
-  jira_sync.py [--root <mailbox>] worked [--transcripts <folder of Claude Code session transcripts>]
+  jira_sync.py [--root <mailbox>] worked [--transcripts <folder of Claude Code session transcripts, replacing the default Claude folder and skipping Copilot and Codex>]
 
 Events and their Jira effect (applied by the orchestrator through its Jira tools):
   start     assign to the user running the orchestrator, move to In Progress
@@ -63,7 +63,7 @@ ESTIMATE = 'estimate'
 EVENTS = (*TARGET_STATUS, WORKLOG, ESTIMATE)
 SECONDS_PER_HOUR = 3600
 JIRA_STARTED_FORMAT = '%Y-%m-%dT%H:%M:%S.000%z'
-TRANSCRIPTS = Path.home() / '.claude' / 'projects'
+TRANSCRIPTS = agent_activity.default_transcripts()
 MAILBOX = mailbox_root(__file__)
 ABANDONED_AFTER = timedelta(days=3)
 WORKED_SO_FAR = Path('jira-sync') / 'worked-so-far.json'
