@@ -52,6 +52,7 @@ One row per completed run. Numbers come from the run log, never from estimates.
 | 2026-11-27 | `context-graph.md` | HIGH | da.loop@2026-11-23.1 | 12 runs (6 agents), max parallel 2 | 5 | 0 | spec BLOCK (2) then PASS; final BLOCK (1) fixed then PASS | 0 | 704981 subagent, main unavailable | see run log | 0 / 0 / 0 / 0 | 1 |
 | 2026-11-27 | `findings-followup.md` | HIGH | da.loop@2026-11-23.1 | 7 runs (4 agents), max parallel 1 | 1 | 0 | spec BLOCK then PASS; final PASS (2 SHOULD_FIX fixed) | 0 | 406465 subagent, main unavailable | see run log | 0 / 0 / 0 / 0 | 1 |
 | 2026-11-27 | `context-pack-auto.md` | HIGH | da.loop@2026-11-23.1 | 17 runs (6 agents), max parallel 1 | 11 | 0 | spec BLOCK then PASS; final PASS (1 SHOULD_FIX fixed) | 0 | 577519 subagent, main unavailable | see run log | 1 / 1 / 0 / 0 | 1 |
+| 2026-11-27 | `status-round-load.md` | MEDIUM | da.loop@2026-11-23.1 | 7 runs (4 agents), max parallel 1 | 3 | 0 | spec BLOCK then PASS; final PASS (1 SUGGEST fixed) | 0 | 212120 subagent, main unavailable | see run log | 0 / 0 / 0 / 0 | 1 |
 
 ## Lessons
 
