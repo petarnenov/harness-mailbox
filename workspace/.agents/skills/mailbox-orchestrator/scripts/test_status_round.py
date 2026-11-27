@@ -1225,5 +1225,224 @@ class CollectContextTest(StatusRoundTestCase):
         self.assertNotIn('context', json.loads(requested.stdout))
 
 
+SHALLOW_PROBE_SIBLING = "import sys\nSEEN_DONT_WRITE_BYTECODE = sys.dont_write_bytecode\n\n\ndef mailbox_root(script):\n    return None\n"
+
+
+def shallow_scripts_copy(parent):
+    """A copy of the scripts placed directly in parent, which must have fewer than five ancestors and no registry above."""
+    shutil.copytree(SCRIPT.parent, parent, dirs_exist_ok=True, ignore=shutil.ignore_patterns('test_*', '__pycache__'))
+    script = Path(parent) / 'status_round.py'
+    ancestors = script.resolve().parents
+    if len(ancestors) >= 5 or any((folder / 'projects.json').exists() for folder in ancestors):
+        raise AssertionError(f'precondition not met: {script.resolve()} has {len(ancestors)} ancestors or a registry above it')
+    return script
+
+
+def environment_with_bytecode():
+    return {key: value for key, value in os.environ.items() if key not in ('PYTHONDONTWRITEBYTECODE', 'PYTHONPYCACHEPREFIX')}
+
+
+class ShallowLayoutTest(StatusRoundTestCase):
+    """status_round.py started from a directory with fewer than five ancestors."""
+    UNAVAILABLE = {'available': False, 'packs': {}, 'omitted': 0}
+    MAILBOX_LINE_OUTPUT = MAILBOX_LINE + '\n'
+
+    def setUp(self):
+        super().setUp()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.shallow_directory = temp.name
+        self.shallow = shallow_scripts_copy(temp.name)
+
+    def mailbox_copy(self):
+        parent = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, parent, True)
+        mirror = parent / 'mailbox'
+        shutil.copytree(self.root, mirror)
+        return mirror
+
+    def installed_script(self, mailbox):
+        return install_layout(mailbox) / 'status_round.py'
+
+    def run_script(self, script, *args, root, env=None):
+        command = [sys.executable, str(script), *(['--root', str(root)] if root else []), *args]
+        return subprocess.run(command, capture_output=True, text=True, timeout=60, env=env)
+
+    def run_shallow_and_installed(self, *args):
+        """The same arguments from the shallow copy and from an installed layout, each on its own equal mailbox."""
+        shallow_mailbox, installed_mailbox = self.mailbox_copy(), self.mailbox_copy()
+        shallow = self.run_script(self.shallow, *args, root=shallow_mailbox)
+        installed = self.run_script(self.installed_script(installed_mailbox), *args, root=installed_mailbox,
+                                    env=environment_with_bytecode())
+        return shallow, installed
+
+    def without_context_nodes(self, report):
+        stripped = {key: value for key, value in report.items() if key != 'context'}
+        stripped['decisions_needed'] = [{key: value for key, value in item.items() if key != 'context_node'}
+                                        for item in report['decisions_needed']]
+        return stripped
+
+    def block_with_task_node(self):
+        self.blocked_reply()
+        self.write(f'tasks/proj/{TASK}.json', {'id': TASK, 'project': 'proj', 'status': 'in_progress'})
+
+    # C1
+    def test_shallow_collect_of_a_blocked_report_has_exactly_the_unavailable_context(self):
+        self.block_with_task_node()
+        shallow, installed = self.run_shallow_and_installed('collect', '--endpoint', ORCH, '--slot', SLOT)
+        report = json.loads(shallow.stdout)
+        self.assertEqual((0, '', self.UNAVAILABLE), (shallow.returncode, shallow.stderr, report['context']))
+        self.assertEqual(1, len(report['decisions_needed']))
+        self.assertFalse(any('context_node' in item for item in report['decisions_needed']))
+        self.assertEqual(self.without_context_nodes(json.loads(installed.stdout)), self.without_context_nodes(report))
+
+    def test_shallow_collect_without_a_blocked_report_prints_what_the_installed_layout_prints(self):
+        self.reply(status='idle')
+        shallow, installed = self.run_shallow_and_installed('collect', '--endpoint', ORCH, '--slot', SLOT)
+        self.assertEqual((0, ''), (shallow.returncode, shallow.stderr))
+        self.assertEqual((0, ''), (installed.returncode, installed.stderr))
+        self.assertEqual(json.loads(installed.stdout), json.loads(shallow.stdout))
+
+    def test_shallow_request_prints_what_the_installed_layout_prints(self):
+        shallow, installed = self.run_shallow_and_installed('request', '--endpoint', ORCH, '--at', AT)
+        self.assertEqual((0, ''), (shallow.returncode, shallow.stderr))
+        self.assertEqual((0, ''), (installed.returncode, installed.stderr))
+        self.assertEqual(json.loads(installed.stdout), json.loads(shallow.stdout))
+
+    # C2
+    def test_shallow_without_root_ends_with_the_fixed_mailbox_line_and_no_traceback(self):
+        commands = {'request': ('request', '--endpoint', ORCH, '--at', AT),
+                    'collect': ('collect', '--endpoint', ORCH, '--slot', SLOT)}
+        for name, arguments in commands.items():
+            with self.subTest(name):
+                completed = self.run_script(self.shallow, *arguments, root=None)
+                self.assertNotEqual(0, completed.returncode)
+                self.assertEqual(('', self.MAILBOX_LINE_OUTPUT), (completed.stdout, completed.stderr))
+                for leak in ('Traceback', 'IndexError', self.shallow_directory):
+                    self.assertNotIn(leak, completed.stderr)
+
+    # C5 protect, from the shallow copy
+    def test_shallow_failures_keep_their_fixed_lines_and_exit_statuses(self):
+        missing = self.root / 'no-such-directory'
+        cases = {
+            'root is not a directory': (['--root', str(missing), 'collect', '--endpoint', ORCH], 1, MAILBOX_LINE),
+            'invalid time': (['--root', str(self.root), 'request', '--endpoint', ORCH, '--at', 'yesterday'], 2, USAGE_LINE),
+        }
+        for name, (arguments, status, line) in cases.items():
+            with self.subTest(name):
+                completed = self.run_script(self.shallow, *arguments, root=None)
+                self.assertEqual((status, '', line + '\n'), (completed.returncode, completed.stdout, completed.stderr))
+
+    # C3
+    def test_the_installed_layout_without_root_uses_the_mailbox_that_holds_the_registry(self):
+        self.block_with_task_node()
+        script = self.installed_script(self.root)
+        arguments = ('collect', '--endpoint', ORCH, '--slot', SLOT)
+        implicit = self.run_script(script, *arguments, root=None, env=environment_with_bytecode())
+        explicit = self.run_script(script, *arguments, root=self.root, env=environment_with_bytecode())
+        self.assertEqual((0, ''), (implicit.returncode, implicit.stderr))
+        implicit_report, explicit_report = json.loads(implicit.stdout), json.loads(explicit.stdout)
+        self.assertEqual([f'task:{TASK}'], list(implicit_report['context']['packs']))
+        self.assertEqual(self.without_generation_time(explicit_report), self.without_generation_time(implicit_report))
+
+    def without_generation_time(self, report):
+        packs = {node: {key: value for key, value in pack.items() if key != 'generated_at'}
+                 for node, pack in report['context']['packs'].items()}
+        return dict(report, context=dict(report['context'], packs=packs))
+
+
+class DefaultRootTest(StatusRoundTestCase):
+    def default_root_for(self, script):
+        with mock.patch.object(status_round, '__file__', str(script)):
+            return status_round.default_root()
+
+    def test_the_nearest_directory_above_the_script_that_holds_the_registry_is_the_default_root(self):
+        script = self.root / 'workspace/.agents/skills/mailbox-orchestrator/scripts/status_round.py'
+        self.assertEqual(self.root, self.default_root_for(script))
+        nested = self.root / 'inner'
+        nested.mkdir()
+        (nested / 'projects.json').write_text('{}')
+        self.assertEqual(nested, self.default_root_for(nested / 'a/b/c/d/e/status_round.py'))
+
+    def test_without_a_registry_a_deep_script_defaults_to_the_installed_layout_ancestor(self):
+        with tempfile.TemporaryDirectory() as parent:
+            script = Path(parent) / 'a/b/c/d/e/scripts/status_round.py'
+            self.assertEqual(script.resolve().parents[4], self.default_root_for(script))
+
+    def test_without_a_registry_a_shallow_script_has_no_default_root(self):
+        shallow = Path('/status-round-shallow/status_round.py')
+        with self.assertRaises(MailboxError) as raised:
+            self.default_root_for(shallow)
+        self.assertEqual(MAILBOX_LINE, str(raised.exception))
+
+    def test_main_without_root_uses_the_default_root(self):
+        with mock.patch.object(status_round, 'default_root', return_value=self.root) as default_root:
+            with redirect_stdout(io.StringIO()):
+                main(['request', '--endpoint', ORCH, '--at', AT])
+        default_root.assert_called_once_with()
+        self.assertIn(f'{self.request_id()}.json', self.inbox_files())
+
+    def test_main_with_root_never_resolves_the_default(self):
+        with mock.patch.object(status_round, 'default_root', side_effect=MailboxError(MAILBOX_LINE)) as default_root:
+            self.request()
+        default_root.assert_not_called()
+
+    def test_main_without_root_and_without_a_default_root_raises_the_mailbox_error(self):
+        with mock.patch.object(status_round, 'default_root', side_effect=MailboxError(MAILBOX_LINE)):
+            with self.assertRaises(MailboxError):
+                main(['collect', '--endpoint', ORCH])
+
+    def test_the_parser_has_no_root_default_and_the_module_has_no_mailbox_constant(self):
+        args = status_round.build_parser().parse_args(['request', '--endpoint', ORCH])
+        self.assertIsNone(args.root)
+        self.assertFalse(hasattr(status_round, 'MAILBOX'))
+
+
+class NoBytecodeTest(StatusRoundTestCase):
+    def run_installed(self, scripts, *arguments):
+        return subprocess.run([sys.executable, str(scripts / 'status_round.py'), '--root', str(self.root), *arguments],
+                              capture_output=True, text=True, timeout=60, env=environment_with_bytecode())
+
+    def cache_entries(self):
+        return sorted(str(path.relative_to(self.root)) for path in self.root.rglob('*')
+                      if path.name == '__pycache__' or path.suffix == '.pyc')
+
+    def test_collect_from_an_installed_layout_creates_no_file(self):
+        self.blocked_reply()
+        self.write(f'tasks/proj/{TASK}.json', {'id': TASK, 'project': 'proj', 'status': 'in_progress'})
+        scripts = install_layout(self.root)
+        before = snapshot(self.root)
+        completed = self.run_installed(scripts, 'collect', '--endpoint', ORCH, '--slot', SLOT)
+        report = json.loads(completed.stdout)
+        self.assertEqual((0, '', True, [f'task:{TASK}']),
+                         (completed.returncode, completed.stderr, report['context']['available'],
+                          [item.get('context_node') for item in report['decisions_needed']]))
+        self.assertEqual([], self.cache_entries())
+        self.assertEqual(before, snapshot(self.root))
+
+    def test_request_from_an_installed_layout_creates_only_its_mailbox_records(self):
+        scripts = install_layout(self.root)
+        before = set(file_contents(self.root))
+        completed = self.run_installed(scripts, 'request', '--endpoint', ORCH, '--at', AT)
+        self.assertEqual((0, ''), (completed.returncode, completed.stderr))
+        created = sorted(set(file_contents(self.root)) - before)
+        self.assertEqual([f'inbox/proj/{self.request_id()}.json'], created)
+        self.assertEqual([], self.cache_entries())
+
+    def test_the_sibling_imports_are_made_with_bytecode_writing_off_and_the_flag_is_restored(self):
+        with tempfile.TemporaryDirectory() as parent:
+            for module in ('receive', 'mailbox_layout'):
+                (Path(parent) / f'{module}.py').write_text(SHALLOW_PROBE_SIBLING)
+            for starting in (False, True):
+                with self.subTest(starting=starting), mock.patch.dict(sys.modules), \
+                        mock.patch.object(sys, 'path', [parent, *sys.path]), \
+                        mock.patch.object(sys, 'dont_write_bytecode', starting):
+                    sys.modules.pop('receive'), sys.modules.pop('mailbox_layout')
+                    runpy.run_path(str(SCRIPT), run_name='status_round_probe')
+                    seen = (sys.modules['receive'].SEEN_DONT_WRITE_BYTECODE,
+                            sys.modules['mailbox_layout'].SEEN_DONT_WRITE_BYTECODE)
+                    self.assertEqual((True, True, starting), (*seen, sys.dont_write_bytecode))
+
+
 if __name__ == '__main__':
     unittest.main()

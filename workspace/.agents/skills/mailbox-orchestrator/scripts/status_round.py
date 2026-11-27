@@ -22,6 +22,7 @@ non-executable reply; resuming work still goes through dispatch_task.py.
 The cadence is session driven: nothing runs in the background. Run `request` at each 15-minute slot.
 """
 import argparse
+import importlib
 import json
 import os
 import re
@@ -31,10 +32,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import receive
-from mailbox_layout import mailbox_root
-
-MAILBOX = mailbox_root(__file__)
 NAMESPACE = uuid.UUID('6f1d2a54-8c3e-5b7a-9d41-2e0c7a5b9f13')
 SLOT_MINUTES = 15
 SLOT_FORMAT = '%Y-%m-%dT%H:%M:00Z'
@@ -52,6 +49,28 @@ class UsageError(Exception):
 
 class MailboxError(Exception):
     """The mailbox root, registry or inbox is unreadable."""
+
+
+def import_without_bytecode(*names):
+    """The named sibling modules, imported so that they leave no cache file beside the scripts."""
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        return [importlib.import_module(name) for name in names]
+    finally:
+        sys.dont_write_bytecode = previous
+
+
+receive, mailbox_layout = import_without_bytecode('receive', 'mailbox_layout')
+mailbox_root = mailbox_layout.mailbox_root
+
+
+def default_root():
+    """The mailbox root of the installed layout or of the nearest projects.json above this script."""
+    try:
+        return mailbox_root(__file__)
+    except IndexError:  # fewer ancestors than the installed layout needs: no mailbox can be located
+        raise MailboxError(MAILBOX_LINE) from None
 
 
 def utc_now():
@@ -461,7 +480,7 @@ def resolved_root(path):
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--root', type=Path, default=MAILBOX)
+    parser.add_argument('--root', type=Path)
     commands = parser.add_subparsers(dest='command', required=True)
     request = commands.add_parser('request')
     request.add_argument('--endpoint', required=True)
@@ -474,7 +493,7 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    root = resolved_root(args.root)
+    root = resolved_root(args.root if args.root is not None else default_root())
     if args.command == 'request':
         result = request_round(root, args.endpoint, requested_moment(args.at))
     else:
