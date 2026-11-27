@@ -17,7 +17,7 @@ htmlcov/
 .pytest_cache/
 .DS_Store
 
-# Mailbox data belongs outside the application checkout
+# Mailbox data belongs outside Git; a standalone checkout keeps it in the ignored mailbox-data/
 /mailbox-data/
 /data/
 /projects.json
@@ -40,6 +40,9 @@ htmlcov/
 /deliveries/
 /jira-sync/
 /reports/
+
+# The workspace template holds no gate records
+/workspace/dispatch-gates/
 
 # Make workflow coverage artifacts
 .coverage-output/
