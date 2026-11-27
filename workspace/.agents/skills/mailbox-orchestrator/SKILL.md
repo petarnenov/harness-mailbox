@@ -95,6 +95,17 @@ For the active receive loop run `python3 <skill-dir>/scripts/receive.py --root <
 
 A harmless PING/PONG with the worker's project path can establish reachability when a registered session's mapping is uncertain. Do not message unrelated threads while searching for workers.
 
+## Status round every 15 minutes
+
+During an active objective, ask every registered worker for its status every 15 minutes with `scripts/status_round.py`. The cadence comes from this session's own wake mechanism (in Claude Code `/loop 15m` or a scheduled wakeup; on a host without one, from the bounded receive loop while it runs); no background process, cron entry or other monitor is installed (user decision 2026-11-27).
+
+1. Run `status_round.py request --endpoint <your orchestrator endpoint>`. It publishes one non-executable `status_request` per registered worker into `inbox/<project>/`, keyed by the 15-minute UTC slot, the project and the worker's endpoint. Running it again in the same slot publishes nothing and changes no file, so a missed or repeated tick is harmless. Registrations it cannot address are listed under `skipped`; report them, do not repair them by hand. Notify each verified destination thread with the path of its request, as for any other coordination message.
+2. Before the next tick, run `status_round.py collect --endpoint <your orchestrator endpoint>` (read-only). It shows each worker's `status_report` for the slot, the workers that have not answered (`missing`), the blocked workers' context and question (`decisions_needed`) and blocked reports without a task, context or question (`incomplete`). Ask an incomplete reporter for the missing fields; do not guess them.
+3. Decide each `decisions_needed` entry whose `decided` is false. Apply the checks of step 5 in *Deliver and receive* (envelope, sender, task binding), consult project agents when information is missing, and escalate to the user only what is theirs to decide. Publish the decision at `decisions/<task_id>/<report-id>.json` and reply to the worker with a non-executable coordination message. A decision answers the question; resuming execution still goes through `dispatch_task.py dispatch`, and the scope boundary, loop gates and Jira policy stay in force.
+4. Treat `missing` as a reachability observation for the next reconciliation, never as proof that a session is gone.
+
+A status request authorizes no work and is never a substitute for a gated dispatch.
+
 ## Verify, report and resume
 
 - Distinguish queued, delivered, acknowledged, working, blocked and verified complete. A worker saying done is evidence to inspect, not automatic acceptance.
@@ -188,7 +199,7 @@ Add `epic_key` and `issue_key` to delegated local task records. Do not copy secr
 - Include blocker age and last worker update where timestamps exist. Do not infer work hours, cost, velocity or ETA from message timestamps or guess unavailable metrics; the only derived hours are the Jira worklog that `jira_sync.py` computes from the agents' session transcripts between its applied `start` and `verified` updates.
 - Mark overall Epic completion only when scope enumeration is complete, all in-scope issues are verified, Epic-level acceptance criteria and cross-project integration checks pass, and no required work remains. A 100% issue count alone is not sufficient.
 
-Refresh local metrics after meaningful worker responses and on user status requests. Reconcile with Jira using read operations at activation/resume or when scope changes are suspected. Report the data's freshness; this skill installs no background monitor.
+Refresh local metrics after meaningful worker responses and on user status requests. Reconcile with Jira using read operations at activation/resume or when scope changes are suspected. Report the data's freshness; this skill installs no background monitor (the 15-minute status round is driven by this session's own wake mechanism, see *Status round every 15 minutes*).
 
 ## Mandatory project loop protocol
 

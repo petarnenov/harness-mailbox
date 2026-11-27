@@ -5,7 +5,7 @@ user-invocable: false
 globs: []
 ---
 
-RULEBOOK: da-python@2026-11-23.2
+RULEBOOK: da-python@2026-11-27.1
 
 # Python production rules
 
@@ -24,6 +24,7 @@ Apply these rules to production code in this repository: root modules `server.py
 - **§K2.4 (P2)** Identify records with canonical UUIDs and stamp them with timezone-aware UTC ISO-8601 timestamps; reject timestamps without an explicit timezone.
 - **§K2.5 (P1)** Keep the dashboard and the gate on one dependency-graph projection, so eligibility shown in the UI and enforced by `dispatch` cannot diverge.
 - **§K2.6 (P1)** Scripts that write to Jira or AIO perform only the event types the workspace `AGENTS.md` allows, read tokens only from the documented local environment file and never print, log or persist them.
+- **§K2.7** (P2) When a workspace script publishes a request with a reply template, list in that template and in the workspace protocol docs every field that the reply's consumers validate, including the reply's id (K03).
 
 ## §K3. HTTP behavior
 - **§K3.1 (P1)** Keep the security headers on every response (`Content-Security-Policy` without inline script, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`) and serve only the allow-listed static files.
