@@ -445,6 +445,13 @@ def collect_round(root, orchestrator_endpoint, slot):
     return report
 
 
+def with_context(root, report):
+    """The collect report plus the context block of the tasks its decisions name."""
+    decisions = report['decisions_needed']
+    block = receive.attach_context(root, decisions, lambda decision: decision['task_id'])
+    return dict(report, context=block)
+
+
 def resolved_root(path):
     root = path.resolve()
     if not root.is_dir():
@@ -471,7 +478,7 @@ def main(argv=None):
     if args.command == 'request':
         result = request_round(root, args.endpoint, requested_moment(args.at))
     else:
-        result = collect_round(root, args.endpoint, requested_slot(args.slot, utc_now()))
+        result = with_context(root, collect_round(root, args.endpoint, requested_slot(args.slot, utc_now())))
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return result
 

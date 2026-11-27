@@ -543,6 +543,18 @@ def assemble_pack(graph, tasks, warnings, generated_at, node_id):
             'omitted': {name: len(items) - len(kept[name]) for name, items in lists.items()}, 'warnings': kept['warnings']}
 
 
+def build_context_packs(dashboard, root, read_json, node_ids):
+    """{node id: context pack} for the requested ids the graph has; the graph is built once."""
+    present = {node['id'] for node in dashboard['graph']['nodes']}
+    wanted = [node_id for node_id in node_ids if node_id in present]
+    if not wanted:
+        return {}
+    warnings = []
+    graph = build_context_graph(dashboard, root, read_json, warnings)
+    return {node_id: assemble_pack(graph, dashboard['tasks'], warnings, dashboard['generated_at'], node_id)
+            for node_id in wanted}
+
+
 def build_context_pack(dashboard, root, read_json, node_id):
     """The context pack of a dashboard graph node, or None when the graph has no such node."""
     if not any(node['id'] == node_id for node in dashboard['graph']['nodes']):

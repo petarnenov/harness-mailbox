@@ -3,6 +3,7 @@ import json
 import os
 import re
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+import context_pack
 import receive
 import status_round
 from status_round import FAILURE_LINE, MAILBOX_LINE, USAGE_LINE, MailboxError, UsageError, main
@@ -28,6 +30,33 @@ LOW_ID = '00000000-0000-4000-8000-00000000000a'
 HIGH_ID = 'ffffffff-ffff-4fff-8fff-fffffffffffb'
 MAX_BYTES = 4 * 1024 * 1024
 UTC_Z = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z')
+
+
+BROKEN_CONTEXT_PACK = "'''A context_pack whose import fails with a raw operating-system text.'''\nraise RuntimeError(\"[Errno 13] Permission denied: '/data/secret/context_pack.py'\")\n"
+
+
+def scripts_copy(parent, context_pack_source=None):
+    """A copy of the scripts, deep enough below the filesystem root, without context_pack or with a replacement."""
+    scripts = Path(parent) / 'a/b/c/d/scripts'
+    shutil.copytree(SCRIPT.parent, scripts, ignore=shutil.ignore_patterns('test_*', '__pycache__', 'context_pack.py'))
+    if context_pack_source is not None:
+        (scripts / 'context_pack.py').write_text(context_pack_source)
+    return scripts
+
+
+def install_layout(mailbox):
+    """The installed layout: scripts below .agents/skills and the application's top-level modules in dashboard/."""
+    scripts = mailbox / '.agents/skills/mailbox-orchestrator/scripts'
+    shutil.copytree(SCRIPT.parent, scripts, ignore=shutil.ignore_patterns('test_*', '__pycache__'))
+    (mailbox / 'dashboard').mkdir()
+    for module in SCRIPT.parents[5].glob('*.py'):
+        shutil.copy(module, mailbox / 'dashboard' / module.name)
+    return scripts
+
+
+def file_contents(root, *, skipping=()):
+    return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob('*'))
+            if path.is_file() and path.relative_to(root).parts[0] not in skipping}
 
 
 def snapshot(root):
@@ -551,7 +580,8 @@ class CollectTest(StatusRoundTestCase):
         self.assertEqual(report['decisions_needed'], [{
             'project': 'proj', 'session_id': 'sess-a', 'reply': f'inbox/orchestrator/{reply_id}.json',
             'task_id': TASK, 'context': 'CI is red', 'question': 'Skip the flaky suite?',
-            'options': ['skip', 'wait'], 'decided': False, 'decision_path': None}])
+            'options': ['skip', 'wait'], 'decided': False, 'decision_path': None,
+            'context_node': f'task:{TASK}'}])
         self.assertEqual(self.worker_entry(report)['status'], 'blocked')
 
     def test_blocked_report_without_options_has_an_empty_option_list(self):
@@ -947,7 +977,7 @@ class SupersedeTest(StatusRoundTestCase):
         self.request()
         before = snapshot(self.root)
         report = self.collect()
-        self.assertEqual(set(report), {'slot', 'workers', 'missing', 'decisions_needed', 'incomplete'})
+        self.assertEqual(set(report), {'slot', 'workers', 'missing', 'decisions_needed', 'incomplete', 'context'})
         self.assertEqual(report['missing'], [{'project': 'proj', 'session_id': 'sess-a',
                                               'request': self.request_id()}])
         self.assertEqual(snapshot(self.root), before)
@@ -985,6 +1015,214 @@ class ProtocolIntegrationTest(StatusRoundTestCase):
         (decided,) = self.collect()['decisions_needed']
         self.assertIs(decided['decided'], True)
         self.assertEqual(decided['reply'], f'inbox/orchestrator/{path.name}')
+
+
+class CollectContextTest(StatusRoundTestCase):
+    UNAVAILABLE = {'available': False, 'packs': {}, 'omitted': 0}
+    LEAKS = ('Errno', 'Permission denied', '/data/', 'Traceback')
+    RAW_FAILURE = "[Errno 13] Permission denied: '/data/tasks/proj/secret.json'"
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(sys, 'path', list(sys.path))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.server, self.graph = context_pack.load_dashboard_modules()
+
+    def task_id(self, number):
+        return f'60000000-0000-4000-8000-{number:012}'
+
+    def block_worker(self, number, task_node=True):
+        """Register worker number, give it a task and a complete blocked report for it."""
+        session = f'sess-{number:02}'
+        task = self.task_id(number)
+        self.register(f'proj--{number:02}', 'proj', session)
+        self.write(f'tasks/proj/{task}.json', {'id': task if task_node else 'renamed', 'project': 'proj', 'status': 'in_progress'})
+        request = self.request_id('proj', session)
+        message = status_round.build_expected_reply('proj', session, ORCH, request)
+        message.update(id=str(uuid.UUID(int=number)), created_at='2026-11-27T10:09:00Z', status='blocked', task_ids=[task],
+                       summary='waiting', task_id=task, blocker={'context': 'CI is red', 'question': 'Skip it?'})
+        self.write(f'inbox/orchestrator/{message["id"]}.json', message)
+        return task
+
+    def collect_captured(self):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            report = main(['--root', str(self.root), 'collect', '--endpoint', ORCH, '--slot', SLOT])
+        return report, out.getvalue(), err.getvalue()
+
+    def without_time(self, pack):
+        return {key: value for key, value in pack.items() if key != 'generated_at'}
+
+    def test_decisions_gain_the_packs_context_pack_prints_and_a_context_node(self):
+        tasks = [self.block_worker(number) for number in (1, 2)]
+        report = self.collect()
+        self.assertEqual([f'task:{task}' for task in tasks], [item['context_node'] for item in report['decisions_needed']])
+        self.assertEqual((True, 0), (report['context']['available'], report['context']['omitted']))
+        for task in tasks:
+            expected = self.without_time(context_pack.read_pack(self.root, f'task:{task}'))
+            self.assertEqual(expected, self.without_time(report['context']['packs'][f'task:{task}']))
+
+    def test_every_existing_key_is_kept_and_only_context_and_context_node_are_added(self):
+        self.block_worker(1)
+        report = self.collect()
+        self.assertEqual({'slot', 'workers', 'missing', 'decisions_needed', 'incomplete', 'context'}, set(report))
+        (decision,) = report['decisions_needed']
+        self.assertEqual({'project', 'session_id', 'reply', 'task_id', 'context', 'question', 'options', 'decided',
+                          'decision_path', 'context_node'}, set(decision))
+
+    def test_the_printed_report_is_the_returned_report_with_its_context(self):
+        self.block_worker(1)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            report = main(['--root', str(self.root), 'collect', '--endpoint', ORCH, '--slot', SLOT])
+        self.assertEqual(report, json.loads(out.getvalue()))
+
+    def test_a_blocked_task_that_is_no_graph_node_gets_no_entry_and_no_context_node(self):
+        self.block_worker(1, task_node=False)
+        report = self.collect()
+        self.assertEqual(({'available': True, 'packs': {}, 'omitted': 0}, False),
+                         (report['context'], 'context_node' in report['decisions_needed'][0]))
+
+    def test_only_the_first_ten_distinct_tasks_are_looked_up_and_an_unknown_one_uses_its_slot(self):
+        for number in range(1, 12):
+            self.block_worker(number, task_node=number != 4)
+        report = self.collect()
+        marked = [item['task_id'] for item in report['decisions_needed'] if 'context_node' in item]
+        self.assertEqual((9, 1), (len(report['context']['packs']), report['context']['omitted']))
+        self.assertEqual(9, len(marked))
+        self.assertNotIn(self.task_id(4), marked)
+        self.assertNotIn(f'task:{self.task_id(11)}', report['context']['packs'])
+        self.assertNotIn(f'task:{self.task_id(4)}', report['context']['packs'])
+
+    def test_the_dashboard_and_the_graph_are_built_once_for_several_tasks(self):
+        for number in (1, 2):
+            self.block_worker(number)
+        with (mock.patch.object(self.server, 'build_dashboard', wraps=self.server.build_dashboard) as dashboard,
+              mock.patch.object(self.graph, 'build_context_graph', wraps=self.graph.build_context_graph) as graph):
+            report = self.collect()
+        self.assertEqual((2, 1, 1), (len(report['context']['packs']), dashboard.call_count, graph.call_count))
+
+    def test_without_a_blocked_report_the_dashboard_code_is_not_loaded(self):
+        self.reply(status='idle')
+        with mock.patch.object(context_pack, 'load_dashboard_modules') as loader:
+            report = self.collect()
+        loader.assert_not_called()
+        self.assertEqual({'available': True, 'packs': {}, 'omitted': 0}, report['context'])
+        self.assertEqual([], report['decisions_needed'])
+
+    def test_a_failing_context_leaves_the_report_as_without_the_failure(self):
+        self.block_worker(1)
+        healthy = self.collect()
+        task = self.task_id(1)
+        failures = {
+            'loader': mock.patch.object(context_pack, 'load_dashboard_modules',
+                                        side_effect=context_pack.Refusal(context_pack.CODE_NOT_LOADED, 1)),
+            'dashboard': mock.patch.object(self.server, 'build_dashboard', side_effect=OSError(self.RAW_FAILURE)),
+            'unprintable': mock.patch.object(self.graph, 'build_context_packs',
+                                             return_value={f'task:{task}': {'bad': float('nan')}}),
+        }
+        for name, failure in failures.items():
+            with self.subTest(name), failure:
+                report, out, err = self.collect_captured()
+            self.assertEqual(self.UNAVAILABLE, report['context'])
+            self.assertEqual(self.report_without_context(healthy), self.report_without_context(report))
+            self.assertEqual(report, json.loads(out))
+            for leak in self.LEAKS:
+                self.assertNotIn(leak, out + err)
+            self.assertEqual('', err)
+
+    def report_without_context(self, report):
+        stripped = {key: value for key, value in report.items() if key != 'context'}
+        stripped['decisions_needed'] = [{key: value for key, value in item.items() if key != 'context_node'}
+                                        for item in report['decisions_needed']]
+        return stripped
+
+    def test_collect_with_packs_attached_leaves_the_mailbox_byte_identical(self):
+        self.block_worker(1)
+        before = snapshot(self.root)
+        report = self.collect()
+        self.assertEqual(1, len(report['context']['packs']))
+        self.assertEqual(snapshot(self.root), before)
+
+    def test_request_output_has_no_context_and_does_not_load_the_dashboard_code(self):
+        with mock.patch.object(context_pack, 'load_dashboard_modules') as loader:
+            result = self.request()
+        loader.assert_not_called()
+        self.assertNotIn('context', result)
+
+    def run_script(self, script, *args, root=None):
+        return subprocess.run([sys.executable, '-B', str(script), '--root', str(root or self.root), *args],
+                              capture_output=True, text=True, timeout=60)
+
+    def test_an_unusable_context_pack_script_leaves_collect_as_without_the_failure(self):
+        self.block_worker(1)
+        healthy = self.run_script(SCRIPT, 'collect', '--endpoint', ORCH, '--slot', SLOT)
+        self.assertEqual((0, ''), (healthy.returncode, healthy.stderr))
+        for name, source in (('missing', None), ('failing on import', BROKEN_CONTEXT_PACK)):
+            with self.subTest(name), tempfile.TemporaryDirectory() as parent:
+                scripts = scripts_copy(parent, source)
+                completed = self.run_script(scripts / 'status_round.py', 'collect', '--endpoint', ORCH, '--slot', SLOT)
+                report = json.loads(completed.stdout)
+                self.assertEqual((0, '', self.UNAVAILABLE), (completed.returncode, completed.stderr, report['context']))
+                self.assertEqual(self.report_without_context(json.loads(healthy.stdout)), self.report_without_context(report))
+                self.assertFalse(any('context_node' in item for item in report['decisions_needed']))
+                for leak in (*self.LEAKS, 'context_pack', 'RuntimeError'):
+                    self.assertNotIn(leak, completed.stdout + completed.stderr)
+
+    def test_without_a_blocked_report_an_unusable_context_pack_does_not_make_the_context_unavailable(self):
+        self.reply(status='idle')
+        for name, source in (('missing', None), ('failing on import', BROKEN_CONTEXT_PACK)):
+            with self.subTest(name), tempfile.TemporaryDirectory() as parent:
+                scripts = scripts_copy(parent, source)
+                completed = self.run_script(scripts / 'status_round.py', 'collect', '--endpoint', ORCH, '--slot', SLOT)
+                self.assertEqual((0, ''), (completed.returncode, completed.stderr))
+                report = json.loads(completed.stdout)
+                self.assertEqual(({'available': True, 'packs': {}, 'omitted': 0}, []),
+                                 (report['context'], report['decisions_needed']))
+
+    def test_collect_in_an_installed_layout_with_a_pack_writes_no_context_or_dashboard_bytecode(self):
+        task = self.block_worker(1)
+        scripts = install_layout(self.root)
+        records_before = file_contents(self.root, skipping=('.agents', 'dashboard'))
+        dashboard_before = file_contents(self.root / 'dashboard')
+        environment = {key: value for key, value in os.environ.items()
+                       if key not in ('PYTHONDONTWRITEBYTECODE', 'PYTHONPYCACHEPREFIX')}
+        completed = subprocess.run([sys.executable, str(scripts / 'status_round.py'), '--root', str(self.root), 'collect',
+                                    '--endpoint', ORCH, '--slot', SLOT], capture_output=True, text=True, timeout=60,
+                                   env=environment)
+        report = json.loads(completed.stdout)
+        self.assertEqual((0, '', True, [f'task:{task}']),
+                         (completed.returncode, completed.stderr, report['context']['available'],
+                          [item.get('context_node') for item in report['decisions_needed']]))
+        self.assertEqual(records_before, file_contents(self.root, skipping=('.agents', 'dashboard')))
+        self.assertEqual(dashboard_before, file_contents(self.root / 'dashboard'))
+        self.assertEqual([], list(scripts.glob('__pycache__/context_pack*')))
+
+    def test_request_works_and_keeps_its_keys_while_context_pack_is_unusable(self):
+        reference = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, reference, True)
+        mirror = reference / 'mailbox'
+        shutil.copytree(self.root, mirror)
+        expected = set(json.loads(self.run_script(SCRIPT, 'request', '--endpoint', ORCH, '--at', AT, root=mirror).stdout))
+        for name, source in (('missing', None), ('failing on import', BROKEN_CONTEXT_PACK)):
+            with self.subTest(name), tempfile.TemporaryDirectory() as parent:
+                scripts = scripts_copy(parent, source)
+                completed = self.run_script(scripts / 'status_round.py', 'request', '--endpoint', ORCH, '--at', AT)
+                self.assertEqual((0, ''), (completed.returncode, completed.stderr))
+                self.assertEqual(expected, set(json.loads(completed.stdout)))
+                self.assertNotIn('context', json.loads(completed.stdout))
+                self.assertNotIn('Permission denied', completed.stdout)
+
+    def test_the_cli_prints_the_context_for_collect_and_none_for_request(self):
+        self.block_worker(1)
+        collected = self.run_cli('collect', '--endpoint', ORCH, '--slot', SLOT)
+        self.assertEqual((0, ''), (collected.returncode, collected.stderr))
+        printed = json.loads(collected.stdout)
+        self.assertEqual([f'task:{self.task_id(1)}'], list(printed['context']['packs']))
+        requested = self.run_cli('request', '--endpoint', ORCH, '--at', AT)
+        self.assertEqual(0, requested.returncode)
+        self.assertNotIn('context', json.loads(requested.stdout))
 
 
 if __name__ == '__main__':

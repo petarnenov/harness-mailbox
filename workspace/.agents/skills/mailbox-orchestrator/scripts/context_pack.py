@@ -12,6 +12,7 @@ from pathlib import Path
 from mailbox_layout import REGISTRY, gate_directory, mailbox_root
 
 MAILBOX = mailbox_root(__file__)
+LOOKUP_LIMIT = 10
 NODE = re.compile(r'(?:task|issue):[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 USAGE = 'context_pack: usage: context_pack.py [--root <mailbox>] <task:id|issue:KEY>'
 INVALID_NODE = 'context_pack: invalid node'
@@ -57,14 +58,22 @@ def mailbox_to_read(named_root):
     return MAILBOX
 
 
-def load_context_for():
-    """The dashboard's context_for, imported from the nearest dashboard copy above this script."""
+def load_dashboard_modules():
+    """(server, context_graph), imported from the nearest dashboard copy above this script."""
     try:
         directory = str(gate_directory(__file__))
         if directory not in sys.path:
             sys.path.insert(0, directory)
-        import context_graph  # noqa: F401  # server imports it lazily; load it here so a broken copy is reported as unloadable code
+        import context_graph  # server imports it lazily; load it here so a broken copy is reported as unloadable code
         import server
+        return server, context_graph
+    except Exception:
+        raise Refusal(CODE_NOT_LOADED, 1) from None
+
+
+def load_context_for():
+    server, _ = load_dashboard_modules()
+    try:
         return server.context_for
     except Exception:
         raise Refusal(CODE_NOT_LOADED, 1) from None
@@ -79,6 +88,50 @@ def read_pack(root, node):
     if pack is None:
         raise Refusal(NODE_NOT_FOUND, 1)
     return pack
+
+
+def task_node(task_id):
+    return f'task:{task_id}'
+
+
+def distinct(task_ids):
+    return list(dict.fromkeys(task_ids))
+
+
+def context_block(root, task_ids):
+    """The 'context' object for the tasks a script names; never raises and prints nothing.
+
+    The dashboard code is loaded, and the dashboard and the graph built, once and only when a task is named.
+    """
+    named = distinct(task_ids)
+    block = {'available': True, 'packs': {}, 'omitted': max(0, len(named) - LOOKUP_LIMIT)}
+    if not named:
+        return block
+    try:
+        server, context_graph = load_dashboard_modules()
+        nodes = [task_node(task_id) for task_id in named[:LOOKUP_LIMIT]]
+        block['packs'] = context_graph.build_context_packs(server.build_dashboard(root), root, server.read_json, nodes)
+        require_printable(block)
+    except Exception:
+        return unavailable_context()
+    return block
+
+
+def require_printable(block):
+    """Raise when the block cannot be printed as strict JSON, so the caller reports it unavailable."""
+    json.dumps(block, allow_nan=False)
+
+
+def unavailable_context():
+    return {'available': False, 'packs': {}, 'omitted': 0}
+
+
+def mark_context_nodes(items, task_id_of, block):
+    """Give each item whose task has a pack in the block its 'context_node'."""
+    for item in items:
+        node = task_node(task_id_of(item))
+        if node in block['packs']:
+            item['context_node'] = node
 
 
 def main(argv):

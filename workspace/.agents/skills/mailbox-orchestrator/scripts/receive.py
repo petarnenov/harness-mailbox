@@ -6,7 +6,9 @@ import math
 import os
 import re
 import stat
+import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 UUID = re.compile(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}')
@@ -172,17 +174,60 @@ def main():
     print(json.dumps(result))
 
 
+def named_task(root, item):
+    """The UUID task id the pending request's message names, or None."""
+    task = envelope(root / item['path']).get('task_id')
+    return task if isinstance(task, str) and UUID.fullmatch(task) else None
+
+
+def unavailable_context():
+    return {'available': False, 'packs': {}, 'omitted': 0}
+
+
+def empty_context():
+    return {'available': True, 'packs': {}, 'omitted': 0}
+
+
+@contextmanager
+def no_bytecode_written():
+    """Imports inside the block write no __pycache__ files: this script must leave the mailbox untouched."""
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        yield
+    finally:
+        sys.dont_write_bytecode = previous
+
+
+def attach_context(root, items, task_id_of):
+    """The context block of the tasks the items name; marks each item that has a pack.
+
+    Every failure, including a context_pack that is missing or fails on import, yields the unavailable block.
+    """
+    try:
+        tasks = {id(item): task_id_of(item) for item in items}
+        named = [item for item in items if tasks[id(item)]]
+        if not named:
+            return empty_context()
+        with no_bytecode_written():
+            import context_pack  # lazy: a missing or broken context_pack must not break the script that uses it
+            block = context_pack.context_block(root, [tasks[id(item)] for item in named])
+            context_pack.mark_context_nodes(named, lambda item: tasks[id(item)], block)
+    except Exception:
+        return unavailable_context()
+    return block
+
+
 def receive(args):
-    requests = []
-    state = 'idle'
-    if args.active_goal:
-        root = args.root.resolve()
+    if not args.active_goal:
+        return dict(state='idle', requests=[], context=attach_context(args.root, [], named_task))
+    root = args.root.resolve()
+    requests = pending(root, args.endpoint)
+    if not requests and args.wait and not args.wake_confirmed:
+        time.sleep(args.wait)
         requests = pending(root, args.endpoint)
-        if not requests and args.wait and not args.wake_confirmed:
-            time.sleep(args.wait)
-            requests = pending(root, args.endpoint)
-        state = 'pending' if requests else ('yield' if args.wake_confirmed else 'wait')
-    return dict(state=state, requests=requests)
+    state = 'pending' if requests else ('yield' if args.wake_confirmed else 'wait')
+    return dict(state=state, requests=requests, context=attach_context(root, requests, lambda item: named_task(root, item)))
 
 
 if __name__ == '__main__':

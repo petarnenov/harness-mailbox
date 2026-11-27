@@ -717,5 +717,48 @@ class PackLimitTests(MailboxCase):
         self.assertEqual('now', pack['generated_at'])
 
 
+class BuildContextPacksTests(DeliveryCase):
+    def dashboard(self):
+        return server.build_dashboard(self.root)
+
+    def without_time(self, pack):
+        return {key: value for key, value in pack.items() if key != 'generated_at'}
+
+    def build_packs(self, node_ids):
+        return context_graph.build_context_packs(self.dashboard(), self.root, server.read_json, node_ids)
+
+    def test_each_pack_equals_the_single_node_pack(self):
+        node_ids = ['task:T1', 'task:T0', 'issue:A-1']
+        packs = self.build_packs(node_ids)
+        self.assertEqual(node_ids, list(packs))
+        for node_id in node_ids:
+            with self.subTest(node_id=node_id):
+                self.assertEqual(self.without_time(build_pack(self.root, node_id)), self.without_time(packs[node_id]))
+
+    def test_ids_that_are_no_graph_node_are_left_out(self):
+        packs = self.build_packs(['task:missing', 'task:T1', 'issue:NOPE-1'])
+        self.assertEqual(['task:T1'], list(packs))
+
+    def test_the_graph_is_built_once_for_all_requested_nodes(self):
+        with patch.object(context_graph, 'build_context_graph', wraps=context_graph.build_context_graph) as builder:
+            packs = self.build_packs(['task:T1', 'task:T0', 'issue:A-1'])
+        self.assertEqual((3, 1), (len(packs), builder.call_count))
+
+    def test_no_matching_node_gives_an_empty_result_without_building_the_graph(self):
+        for node_ids in ([], ['task:missing']):
+            with self.subTest(node_ids=node_ids), patch.object(context_graph, 'build_context_graph') as builder:
+                self.assertEqual({}, self.build_packs(node_ids))
+                builder.assert_not_called()
+
+    def test_building_packs_leaves_the_mailbox_byte_identical(self):
+        before = self.tree_snapshot()
+        self.build_packs(['task:T1'])
+        self.assertEqual(before, self.tree_snapshot())
+
+    def test_the_single_node_pack_is_unchanged_for_a_known_and_an_unknown_node(self):
+        self.assertEqual('task:T1', build_pack(self.root, 'task:T1')['node']['id'])
+        self.assertIsNone(build_pack(self.root, 'task:missing'))
+
+
 if __name__ == '__main__':
     unittest.main()
