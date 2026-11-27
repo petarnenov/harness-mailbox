@@ -268,7 +268,7 @@ case "${1:-help}" in
             --mount "type=bind,source=$APP_DIR,target=/workspace,readonly" \
             --mount "type=bind,source=$APP_DIR/.coverage-output,target=/coverage" \
             --workdir /workspace "$TOOLS_IMAGE" sh -c \
-            'measure="python -B -m coverage run --branch --source=server,dependency_graph,dispatch_gate,delivery_process,$SCRIPT_TESTS,workspace/copilot-mailbox,workspace/.agents/skills/mailbox-register-sessions/scripts --omit=*/test_*.py" && $measure -m unittest discover -s tests -v && $measure --append -m unittest discover -s "$SCRIPT_TESTS" -v && python -B -m coverage report -m && python -B -m coverage json -o /coverage/coverage.json && python -B -m coverage html -d /coverage/html'
+            'measure="python -B -m coverage run --branch --source=server,dependency_graph,dispatch_gate,delivery_process,context_graph,$SCRIPT_TESTS,workspace/copilot-mailbox,workspace/.agents/skills/mailbox-register-sessions/scripts --omit=*/test_*.py" && $measure -m unittest discover -s tests -v && $measure --append -m unittest discover -s "$SCRIPT_TESTS" -v && python -B -m coverage report -m && python -B -m coverage json -o /coverage/coverage.json && python -B -m coverage html -d /coverage/html'
         ;;
     *) fail 'Unknown command. Run make help.' ;;
 esac

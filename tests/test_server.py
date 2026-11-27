@@ -1,6 +1,8 @@
 import json
 import os
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -831,6 +833,161 @@ class HandlerTests(Fixture):
         status_line, *header_lines = head.decode('latin-1').split('\r\n')
         headers = {name.lower(): value.strip() for name, _, value in (line.partition(':') for line in header_lines)}
         return {'status': int(status_line.split()[1]), 'headers': headers, 'body': body}
+
+
+class ContextApiTests(Fixture):
+    RAW_FAILURE = "[Errno 13] Permission denied: '/data/decisions/T1/g1.json'"
+    NODE_MESSAGE = 'Query parameter node must be task:<id> or issue:<key>'
+
+    def setUp(self):
+        super().setUp()
+        quiet_log = patch.object(server.Handler, 'log_message')
+        quiet_log.start()
+        self.addCleanup(quiet_log.stop)
+        self.httpd = server.ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.conn = HTTPConnection('127.0.0.1', self.httpd.server_port)
+        environment = patch.dict(os.environ, {'MAILBOX_ROOT': str(self.root)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.put('tasks/p/T1.json', {'id': 'T1', 'project': 'p', 'status': 'in_progress', 'depends_on': ['GHOST']})
+        self.put('decisions/T1/g1.json', {'decision_type': 'g1', 'verdict': 'approved', 'rationale': 'Scope accepted'})
+
+    def tearDown(self):
+        self.conn.close()
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=2)
+        super().tearDown()
+
+    def get(self, path):
+        self.conn.request('GET', path)
+        response = self.conn.getresponse()
+        return response.status, response.read(), dict(response.getheaders())
+
+    def tree_state(self):
+        return {str(path.relative_to(self.root)): path.read_bytes() for path in sorted(self.root.rglob('*')) if path.is_file()}
+
+    def test_a_known_node_is_served_with_its_pack_the_mode_and_the_security_headers(self):
+        status, body, headers = self.get('/api/context?node=task:T1')
+        pack = json.loads(body)
+        self.assertEqual(200, status)
+        self.assertEqual(('live', 'task:T1'), (pack['mode'], pack['node']['id']))
+        self.assertEqual(['decision:T1/g1'], [decision['id'] for decision in pack['decisions']])
+        self.assertEqual('application/json; charset=utf-8', headers['Content-Type'])
+        self.assertEqual('no-store', headers['Cache-Control'])
+        self.assertEqual('nosniff', headers['X-Content-Type-Options'])
+        self.assertEqual(CSP, headers['Content-Security-Policy'])
+
+    def test_a_graph_placeholder_is_served_with_its_unresolved_status(self):
+        status, body, _ = self.get('/api/context?node=task:GHOST')
+        self.assertEqual((200, 'unresolved'), (status, json.loads(body)['node']['status']))
+
+    def test_an_unknown_node_is_not_found_with_the_frozen_body(self):
+        status, body, _ = self.get('/api/context?node=task:nothing')
+        self.assertEqual((404, {'error': {'code': 'not_found', 'message': 'Context node not found'}}), (status, json.loads(body)))
+
+    def test_a_missing_repeated_or_malformed_node_is_an_invalid_request_with_the_frozen_message(self):
+        cases = ('/api/context', '/api/context?node=', '/api/context?node=task:T1&node=task:T1', '/api/context?node=T1',
+                 '/api/context?node=epic:E', '/api/context?node=task:', '/api/context?node=task:-x', '/api/context?node=task:a/b',
+                 '/api/context?node=task:' + 'a' * 129, '/api/context?node=task:T1%0A')
+        for path in cases:
+            with self.subTest(path=path):
+                status, body, _ = self.get(path)
+                self.assertEqual((400, {'error': {'code': 'invalid_request', 'message': self.NODE_MESSAGE}}), (status, json.loads(body)))
+
+    def test_a_node_of_the_longest_allowed_identifier_is_accepted(self):
+        self.assertEqual(404, self.get('/api/context?node=issue:' + 'a' * 128)[0])
+
+    def test_an_unknown_mode_is_rejected_with_the_message_of_the_dashboard_route(self):
+        status, body, _ = self.get('/api/context?node=task:T1&mode=wat')
+        _, dashboard_body, _ = self.get('/api/dashboard?mode=wat')
+        self.assertEqual(400, status)
+        self.assertEqual(json.loads(dashboard_body)['error'], json.loads(body)['error'])
+
+    def test_demo_mode_reads_the_demo_directory_and_not_the_mailbox_root(self):
+        demo = Path(self.temp.name) / 'checkout'
+        (demo / 'demo' / 'tasks' / 'p').mkdir(parents=True)
+        (demo / 'demo' / 'tasks' / 'p' / 'D1.json').write_text(json.dumps({'id': 'D1', 'project': 'p'}))
+        with patch.object(server, 'ROOT', demo):
+            demo_status, demo_body, _ = self.get('/api/context?node=task:D1&mode=demo')
+            live_status, _, _ = self.get('/api/context?node=task:D1&mode=live')
+        self.assertEqual((200, 'demo', 404), (demo_status, json.loads(demo_body)['mode'], live_status))
+
+    def test_mutating_methods_are_rejected_as_read_only(self):
+        for method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+            with self.subTest(method=method):
+                self.conn.request(method, '/api/context?node=task:T1', body=b'{"x": 1}')
+                response = self.conn.getresponse()
+                self.assertEqual((405, 'read_only'), (response.status, json.loads(response.read())['error']['code']))
+
+    def test_requests_leave_the_mailbox_tree_byte_identical(self):
+        before = self.tree_state()
+        for path in ('/api/context?node=task:T1', '/api/context?node=task:nothing', '/api/context?node=bad'):
+            self.get(path)
+        self.conn.request('POST', '/api/context?node=task:T1', body=b'{}')
+        self.conn.getresponse().read()
+        self.assertEqual(before, self.tree_state())
+
+    def test_an_unexpected_failure_is_the_fixed_message_without_the_raw_text(self):
+        with patch.object(server, 'read_json', side_effect=OSError(self.RAW_FAILURE)):
+            status, body, _ = self.get('/api/context?node=task:T1')
+        self.assertEqual((500, {'error': {'code': 'internal_error', 'message': 'Context data could not be read'}}), (status, json.loads(body)))
+        for raw in ('Permission denied', '/data/decisions', 'Errno', 'Traceback'):
+            self.assertNotIn(raw, body.decode())
+
+    def test_a_failure_while_building_the_pack_is_the_fixed_message_without_the_raw_text(self):
+        failure = RuntimeError('Traceback (most recent call last): File "/data/server.py", line 1')
+        with patch.object(server, 'context_for', side_effect=failure):
+            status, body, _ = self.get('/api/context?node=task:T1')
+        self.assertEqual((500, 'Context data could not be read'), (status, json.loads(body)['error']['message']))
+        self.assertNotIn('Traceback', body.decode())
+        self.assertNotIn('/data/server.py', body.decode())
+
+    def test_a_pack_that_cannot_be_serialised_without_non_finite_numbers_is_the_fixed_failure(self):
+        with patch.object(server, 'context_for', return_value={'bad': float('nan')}):
+            status, body, _ = self.get('/api/context?node=task:T1')
+        self.assertEqual((500, 'internal_error'), (status, json.loads(body)['error']['code']))
+
+
+class ContextCompositionTests(Fixture):
+    def test_context_for_returns_the_pack_of_a_known_node_and_none_for_an_unknown_one(self):
+        self.put('tasks/p/T1.json', {'id': 'T1', 'project': 'p'})
+        self.assertEqual('task:T1', server.context_for(self.root, 'task:T1')['node']['id'])
+        self.assertIsNone(server.context_for(self.root, 'task:nothing'))
+
+    def test_parse_node_returns_the_single_valid_value_and_refuses_anything_else(self):
+        self.assertEqual('issue:A-1', server.parse_node({'node': ['issue:A-1']}))
+        for query in ({}, {'node': []}, {'node': ['task:a', 'task:b']}, {'node': ['nope']}, {'node': ['task:a b']}):
+            with self.subTest(query=query):
+                with self.assertRaises(server.InvalidRequest) as refusal:
+                    server.parse_node(query)
+                self.assertEqual('Query parameter node must be task:<id> or issue:<key>', str(refusal.exception))
+
+    def test_mode_root_is_the_demo_directory_for_demo_and_the_mailbox_root_otherwise(self):
+        with patch.dict(os.environ, {'MAILBOX_ROOT': '/mailbox'}), patch.object(server, 'ROOT', Path('/checkout')):
+            self.assertEqual((Path('/checkout/demo'), Path('/mailbox')), (server.mode_root('demo'), server.mode_root('live')))
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(Path('/data'), server.mode_root('live'))
+
+    def test_importing_server_does_not_import_the_context_graph(self):
+        checkout = Path(server.__file__).resolve().parent
+        probe = 'import sys, server, dispatch_gate; sys.exit(1 if "context_graph" in sys.modules else 0)'
+        result = subprocess.run([sys.executable, '-B', '-c', probe], cwd=checkout, capture_output=True, text=True)
+        self.assertEqual((0, ''), (result.returncode, result.stderr))
+
+    def test_the_dashboard_is_the_same_with_and_without_the_records_only_the_context_graph_reads(self):
+        self.put('tasks/p/T1.json', {'id': 'T1', 'project': 'p', 'owner_session_id': 's-1', 'g1_decision': 'decisions/T1/g1.json'})
+        without = server.build_dashboard(self.root)
+        self.put('decisions/T1/g1.json', {'verdict': 'approved'})
+        self.put('outbox/p/m.json', {'id': 'm', 'type': 'review_request', 'task_id': 'T1'})
+        self.put('reports/p/r.json', {'task_id': 'T1'})
+        self.put('dispatch-gates/T1/rc.json', {'task_id': 'T1', 'operation': 'dispatch', 'allowed': True})
+        self.put('sessions/s-1.json', {'session_id': 's-1'})
+        with_records = server.build_dashboard(self.root)
+        without.pop('generated_at'), with_records.pop('generated_at')
+        self.assertEqual(without, with_records)
 
 
 if __name__ == '__main__':

@@ -1,0 +1,12 @@
+{
+  "decision_type": "g1_revision",
+  "verdict": "approved_with_changes",
+  "decided_at": "2026-11-13T08:30:00Z",
+  "task_id": "7c1d2e3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f",
+  "issue_key": "DEMO-102",
+  "rationale": "Recovery handling moves to DEMO-103; this task keeps only the adapter.",
+  "conditions": [
+    "Wait for DEMO-103 before integration"
+  ],
+  "supersedes": "decisions/atlas/a41e5c7b-92d3-4f60-8b1a-6c0e3d7f2a95.json"
+}

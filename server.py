@@ -587,6 +587,27 @@ def parse_mode(query):
     return mode
 
 
+NODE_PARAMETER = re.compile(r'(?:task|issue):[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
+NODE_MESSAGE = 'Query parameter node must be task:<id> or issue:<key>'
+
+
+def parse_node(query):
+    values = query.get('node', [])
+    if len(values) != 1 or not NODE_PARAMETER.fullmatch(values[0]):
+        raise InvalidRequest(NODE_MESSAGE)
+    return values[0]
+
+
+def context_for(root, node_id):
+    """The context pack of a dashboard graph node, or None when the graph has no such node."""
+    from context_graph import build_context_pack  # lazy: dispatch_gate imports server and must not load it
+    return build_context_pack(build_dashboard(root), root, read_json, node_id)
+
+
+def mode_root(mode):
+    return ROOT / 'demo' if mode == 'demo' else Path(os.environ.get('MAILBOX_ROOT', '/data'))
+
+
 def error_body(status):
     if status == 501:
         code, message = 'unsupported_method', 'Unsupported method'
@@ -619,8 +640,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def dashboard_payload(self, query):
         model, mode = parse_model(query), parse_mode(query)
-        root = ROOT / 'demo' if mode == 'demo' else Path(os.environ.get('MAILBOX_ROOT', '/data'))
-        return json.dumps(build_dashboard(root, model, mode), allow_nan=False).encode()
+        return json.dumps(build_dashboard(mode_root(mode), model, mode), allow_nan=False).encode()
+
+    def context_payload(self, query):
+        """The serialized context pack, or None when the node is unknown."""
+        mode, node_id = parse_mode(query), parse_node(query)
+        pack = context_for(mode_root(mode), node_id)
+        return None if pack is None else json.dumps({**pack, 'mode': mode}, allow_nan=False).encode()
 
     def reply_dashboard(self, query):
         try:
@@ -632,12 +658,26 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(500, {'error': {'code': 'internal_error', 'message': 'Dashboard data could not be read'}})
         return self.reply(200, payload)
 
+    def reply_context(self, query):
+        try:
+            payload = self.context_payload(query)
+        except InvalidRequest as invalid:
+            return self.reply(400, {'error': {'code': 'invalid_request', 'message': str(invalid)}})
+        except Exception as failure:
+            self.log_error('Context projection failed: %r', failure)
+            return self.reply(500, {'error': {'code': 'internal_error', 'message': 'Context data could not be read'}})
+        if payload is None:
+            return self.reply(404, {'error': {'code': 'not_found', 'message': 'Context node not found'}})
+        return self.reply(200, payload)
+
     def do_GET(self):
         parsed = urlsplit(self.path)
         if parsed.path == '/healthz':
             return self.reply(200, {'status': 'ok'})
         if parsed.path == '/api/dashboard':
             return self.reply_dashboard(parse_qs(parsed.query))
+        if parsed.path == '/api/context':
+            return self.reply_context(parse_qs(parsed.query))
         files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/theme.js': ('theme.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}
         if parsed.path in files:
             filename, mime = files[parsed.path]

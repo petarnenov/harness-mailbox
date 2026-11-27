@@ -152,6 +152,53 @@ function timestampDescription(value,now=Date.now()) {
 }
 function addEvidence(target,items) {(items||[]).forEach(item=>target.append(el('p','Evidence: '+String(item))));}
 function addDetailSection(body,title,text) {const section=el('section',undefined,'detail-section');section.append(el('h3',title));if(text)section.append(el('p',String(text)));body.append(section);return section;}
+const contextCache=new Map();
+const contextTexts={loading:'Loading recorded context…',unavailable:'Recorded context is unavailable.',none:'None recorded.',notice:'Recorded context only · lists direct and inherited prerequisites, not prerequisites of prerequisites · eligibility is decided by the dependency gate.'};
+const contextOmittedLabels={ancestors:'ancestors',unmet_prerequisites:'prerequisites',decisions:'decisions',open_requests:'open requests',evidence:'evidence',warnings:'warnings'};
+function pageMode() {return $('demo').checked?'demo':'live';}
+function contextCacheKey(mode,key) {return mode+':'+key;}
+function unknownText(value) {return value===null||value===undefined||value===''?'unknown':String(value);}
+function recordList(value) {return Array.isArray(value)?value.filter(item=>item&&typeof item==='object'&&!Array.isArray(item)):[];}
+function textList(value) {return Array.isArray(value)?value.map(String):[];}
+function contextOwnerLine(owner) {return 'Owner: '+unknownText(owner.owner)+' · task '+unknownText(owner.task_id)+' · session '+unknownText(owner.session_id)+' · project '+unknownText(owner.project)+' · last seen '+timestampDescription(owner.last_seen_at);}
+function contextGroup(title,items,buildRow) {const group=el('div',undefined,'context-group');group.append(el('h4',title));items.forEach(item=>group.append(buildRow(item)));if(!items.length)group.append(el('p',contextTexts.none));return group;}
+function contextRow(heading,lines) {const row=el('article',undefined,'context-item');row.append(el('strong',heading));lines.forEach(line=>row.append(el('p',line)));return row;}
+function decisionRow(decision) {
+ const conditions=textList(decision.conditions),lines=['Decided: '+timestampDescription(decision.decided_at),'Rationale: '+unknownText(decision.rationale)+(decision.rationale_truncated===true?' … [rationale truncated]':'')];
+ if(conditions.length)lines.push('Conditions: '+conditions.join('; '));
+ if(decision.supersedes)lines.push('Supersedes: '+String(decision.supersedes));
+ lines.push('Source: '+unknownText(decision.source));
+ return contextRow(unknownText(decision.decision_type)+' · '+unknownText(decision.verdict),lines);
+}
+function openRequestRow(request) {return contextRow(unknownText(request.type)+' · '+unknownText(request.subject),['From '+unknownText(request.from_project)+' to '+unknownText(request.to_project),'Created: '+timestampDescription(request.created_at),'Source: '+unknownText(request.source)]);}
+function contextEvidenceRow(item) {return contextRow(unknownText(item.kind)+' · '+unknownText(item.label),['Recorded: '+timestampDescription(item.at),'Source: '+unknownText(item.source)]);}
+function prerequisiteRow(item) {
+ const owners=recordList(item.owners),origin=item.inherited_from?'Inherited from '+String(item.inherited_from):'Direct prerequisite';
+ return contextRow(unknownText(item.label)+' · '+unknownText(item.status),[origin,...(owners.length?owners.map(contextOwnerLine):['Owner: unknown'])]);
+}
+function omittedLine(omitted) {
+ const parts=Object.entries(contextOmittedLabels).filter(([field])=>Number(omitted?.[field])>0).map(([field,label])=>label+' '+Number(omitted[field]));
+ return parts.length?'Not shown because of list limits: '+parts.join(', ')+'.':'';
+}
+function contextPackElements(pack) {
+ const elements=[contextGroup('Decisions',recordList(pack.decisions),decisionRow),contextGroup('Open requests',recordList(pack.open_requests),openRequestRow),contextGroup('Latest evidence',recordList(pack.evidence),contextEvidenceRow),contextGroup('Unmet prerequisites and owners',recordList(pack.unmet_prerequisites),prerequisiteRow)];
+ const omitted=omittedLine(pack.omitted);if(omitted)elements.push(el('p',omitted,'context-omitted'));
+ elements.push(el('small',contextTexts.notice,'context-notice'));return elements;
+}
+function contextElements(entry) {
+ if(!entry)return [el('p',contextTexts.loading)];
+ return entry.pack?contextPackElements(entry.pack):[el('p',contextTexts.unavailable)];
+}
+function showContext(key) {const content=$('issue-context-content');if(content)content.replaceChildren(...contextElements(contextCache.get(contextCacheKey(pageMode(),key))));}
+async function fetchContextPack(key,mode) {
+ try{const response=await fetch('/api/context?'+new URLSearchParams({node:'issue:'+key,mode}));if(!response.ok)return null;const pack=await response.json();return pack&&typeof pack==='object'&&!Array.isArray(pack)?pack:null;}catch(_){return null;}
+}
+async function requestContext(key) {
+ const mode=pageMode(),pack=await fetchContextPack(key,mode);
+ if($('issue-detail').dataset.issueKey!==key||pageMode()!==mode)return;
+ contextCache.set(contextCacheKey(mode,key),{pack});showContext(key);
+}
+function addContextSection(body) {const section=addDetailSection(body,'Why · recorded context'),content=el('div',undefined,'context-content');content.id='issue-context-content';section.append(content);return section;}
 function renderIssueDetail(key) {
  const body=$('issue-detail-body'),issue=data.issues.find(i=>i.key===key);body.replaceChildren();if(!issue){$('issue-detail-title').textContent=key;body.append(el('p','This issue is unavailable in the current snapshot.'));return;}
  const d=getDelivery(issue),marker=stageMarker(issue);$('issue-detail-title').textContent=issue.key+' · '+issue.title;
@@ -164,6 +211,7 @@ function renderIssueDetail(key) {
  links.forEach(edge=>{const other=(data.graph.nodes||[]).find(n=>n.id===(edge.to===id?edge.from:edge.to)),line=edge.to===id?'Prerequisite: ':'Dependent: ';dependencies.append(el('p',line+(other?graphRecordLabel(other):edge.to===id?edge.from:edge.to)+' · '+(edge.condition||'Recorded dependency')));addEvidence(dependencies,edge.evidence);});if(!links.length)dependencies.append(el('p','No direct prerequisite or dependent is recorded; this does not establish execution eligibility.'));
  const focus=el('button','Focus this issue in dependency map');focus.type='button';focus.id='focus-issue';focus.addEventListener('click',()=>{focusId=id;focusSubtree=false;closeIssue();$('graph-execution').setAttribute('aria-pressed','true');$('graph-hierarchy').setAttribute('aria-pressed','false');writeUrl('dependencies');selectView();render();});dependencies.append(focus);
  const work=addDetailSection(body,'Linked local work');const tasks=data.tasks.filter(t=>(issue.task_ids||[]).includes(t.id));tasks.forEach(t=>{const row=el('article',undefined,'criterion');row.append(el('strong',`Local task · ${t.id}`),el('p',taskDisplayTitle(t)+' · '+(labels[t.status]||t.status)+' · '+(t.evidenced?'completion evidence recorded':'completion evidence unconfirmed')),el('p',taskAssociation(t)),el('p','Source: '+(t.source||'Unknown')));const evidence=Array.isArray(t.evidence)?t.evidence:(data.graph?.nodes||[]).find(n=>n.id==='task:'+t.id)?.evidence||[];addEvidence(row,evidence);if(!evidence.length)row.append(el('p','Evidence references unavailable.'));work.append(row);});if(!tasks.length)work.append(el('p','No linked local tasks recorded.'));
+ addContextSection(body);showContext(key);
  const acceptance=addDetailSection(body,'Acceptance criteria');
  acceptance.append(el('span','DEFINITION OF DONE','detail-eyebrow'));
  const structured=d.criteria.length>0;
@@ -196,7 +244,7 @@ function renderIssueDetail(key) {
  trace.classList.add('detail-trace');acceptance.classList.add('detail-acceptance');verification.classList.add('detail-verification');dependencies.classList.add('detail-dependencies');work.classList.add('detail-local-work');
  const freshness=el('details',undefined,'detail-source-audit');freshness.append(el('summary','Source freshness & provenance'));body.append(freshness);const clocks=addDetailSection(freshness,'Source freshness');clocks.append(el('p','Jira record updated: '+timestampDescription(d.freshness.jira)),el('p',(d.freshness.worker_basis==='linked_task_updated_at_proxy'?'Worker report proxy (linked task updated): ':'Worker report: ')+timestampDescription(d.freshness.worker)),el('p','Evidence recorded: '+timestampDescription(d.freshness.evidence)),el('p','Dashboard read: '+timestampDescription(data.generated_at)),el('p','Read time does not update source evidence or establish session liveness.'),el('p','Source: '+d.source));
 }
-function openIssue(key) {$('issue-detail').dataset.issueKey=key;detailReturnFocus=document.activeElement;renderIssueDetail(key);if(!$('issue-detail').open)$('issue-detail').showModal();$('close-detail').focus();}
+function openIssue(key) {$('issue-detail').dataset.issueKey=key;detailReturnFocus=document.activeElement;renderIssueDetail(key);requestContext(key);if(!$('issue-detail').open)$('issue-detail').showModal();$('close-detail').focus();}
 function closeIssue() {$('issue-detail').close();if(detailReturnFocus?.isConnected)detailReturnFocus.focus();}
 function comparisonKey(s) {return 'mailbox-process-v1:'+JSON.stringify({mode:data.mode,p:s.p,e:s.e,task:s.taskId,team:s.team,q:s.q,...(s.hideCompleted?{}:{completed:'all'})});}
 function comparisonMembership(values) {return [...new Set((Array.isArray(values)?values:[]).filter(value=>typeof value==='string'&&value.trim()).map(value=>value.trim()))].sort();}
@@ -533,7 +581,7 @@ async function fetchDashboard(params) {
  return payload;
 }
 function refreshFailureReason(failure) {return failure instanceof RefreshFailure?failure.message:refreshFailureReasons.display;}
-async function load(){const ticket=++request;$('error').hidden=true;showRefreshing();const started=Date.now();let succeeded=false;const params=new URLSearchParams({mode:$('demo').checked?'demo':'live'});['low','likely','high','review_multiplier'].forEach(k=>params.set(k,$(k).value));try{const payload=await fetchDashboard(params);if(ticket!==request)return;data=payload;populate('project',data.projects,'id','name','All projects');populateWorkFilter();captureComparison(selection());render();if($('issue-detail').open)renderIssueDetail($('issue-detail').dataset.issueKey);succeeded=true;}catch(e){if(ticket!==request)return;$('error').textContent=`Could not refresh: ${refreshFailureReason(e)}. ${data?'Last successful snapshot is still displayed.':'Check the mailbox mount and try again.'}`;$('error').hidden=false;}finally{await pause(Math.max(0,refreshMinimumMs-(Date.now()-started)));if(ticket===request)showRefreshed(succeeded);}}
+async function load(){const ticket=++request;$('error').hidden=true;showRefreshing();const started=Date.now();let succeeded=false;const params=new URLSearchParams({mode:$('demo').checked?'demo':'live'});['low','likely','high','review_multiplier'].forEach(k=>params.set(k,$(k).value));try{const payload=await fetchDashboard(params);if(ticket!==request)return;data=payload;populate('project',data.projects,'id','name','All projects');populateWorkFilter();captureComparison(selection());render();if($('issue-detail').open){const openKey=$('issue-detail').dataset.issueKey;renderIssueDetail(openKey);requestContext(openKey);}succeeded=true;}catch(e){if(ticket!==request)return;$('error').textContent=`Could not refresh: ${refreshFailureReason(e)}. ${data?'Last successful snapshot is still displayed.':'Check the mailbox mount and try again.'}`;$('error').hidden=false;}finally{await pause(Math.max(0,refreshMinimumMs-(Date.now()-started)));if(ticket===request)showRefreshed(succeeded);}}
 function restoreUrl(){const params=new URLSearchParams(location.search);urlStateErrors=[];selectValue('project',params.get('project')||'');selectValue('epic',params.get('epic')||'');selectValue('team',params.get('team')||'');$('search').value=params.get('search')||'';focusId=params.get('focus')||'';focusSubtree=Boolean(focusId)&&params.get('subtree')==='1';const mode=params.get('mode')||'live';$('demo').checked=mode==='demo';if(!['live','demo'].includes(mode))urlStateErrors.push('Mode: '+mode);const graph=params.get('graph')||'execution';if(!['hierarchy','execution'].includes(graph))urlStateErrors.push('Graph mode: '+graph);$('graph-hierarchy').setAttribute('aria-pressed',String(graph==='hierarchy'));$('graph-execution').setAttribute('aria-pressed',String(graph!=='hierarchy'));$('graph-local-work').checked=params.get('local')==='all';$('hide-completed').checked=params.get('completed')!=='all';}
 function writeUrl(view){const url=new URL(location.href),values={project:$('project').value,epic:$('epic').value,team:$('team').value,search:$('search').value,focus:focusId,subtree:focusId&&focusSubtree?'1':'',mode:$('demo').checked?'demo':'live',graph:$('graph-hierarchy').getAttribute('aria-pressed')==='true'?'hierarchy':'execution',local:$('graph-local-work').checked?'all':'',completed:$('hide-completed').checked?'':'all'};Object.entries(values).forEach(([key,value])=>{if(value)url.searchParams.set(key,value);else url.searchParams.delete(key);});if(view)url.hash=view;urlStateErrors=[];if(url.href!==location.href)history.pushState(null,'',url);}
 function scenario(){const count=Number($('scenario-count').value);const model=data?.estimate_method;if(!model)return;$('scenario-result').textContent=Number.isFinite(count)&&count>=0&&count<=10000?range(Object.fromEntries(['low','likely','high'].map(k=>[k,count*model[k]*model.review_multiplier]))):'Enter a count from 0 to 10,000';}
