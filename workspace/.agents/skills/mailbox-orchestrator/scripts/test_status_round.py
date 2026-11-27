@@ -209,7 +209,8 @@ class RequestIdempotenceTest(StatusRoundTestCase):
         next_id = self.request_id(slot='2026-11-27T10:15:00Z')
         self.assertEqual(result['slot'], '2026-11-27T10:15:00Z')
         self.assertEqual(result['published'], [f'inbox/proj/{next_id}.json'])
-        self.assertEqual(self.inbox_files(), sorted([f'{self.request_id()}.json', f'{next_id}.json']))
+        self.assertEqual(result['superseded'], [f'archive/proj/{self.request_id()}.json'])
+        self.assertEqual(self.inbox_files(), [f'{next_id}.json'])
 
     def test_message_already_in_the_inbox_is_left_untouched(self):
         existing = self.write(f'inbox/proj/{self.request_id()}.json', {'different': 'content'})
@@ -630,6 +631,334 @@ class CollectTest(StatusRoundTestCase):
         inbox.symlink_to(self.root / 'inbox' / 'proj')
         with self.subTest(case='symlink'), self.assertRaises(MailboxError):
             self.collect()
+
+
+class SupersedeTest(StatusRoundTestCase):
+    def old_request(self, slot=PREVIOUS_SLOT, project='proj', session='sess-a', orchestrator=ORCH, name=None,
+                    **fields):
+        """An older status_request as the orchestrator would have published it, written into the inbox."""
+        message = status_round.build_request(slot, project, session, orchestrator, '2026-11-27T09:50:00Z')
+        message.update(fields)
+        self.write(f'inbox/{project}/{name or message["id"]}.json', message)
+        return message['id']
+
+    def older_names(self, project='proj'):
+        current = f'{self.request_id()}.json'
+        return [name for name in self.inbox_files(project) if name != current]
+
+    def archived_names(self, project='proj'):
+        folder = self.root / 'archive' / project
+        return sorted(path.name for path in folder.iterdir()) if folder.is_dir() else []
+
+    def run_as_script(self, *args):
+        stderr = io.StringIO()
+        argv = [str(SCRIPT), '--root', str(self.root), *args]
+        with mock.patch.object(sys, 'argv', argv), redirect_stderr(stderr), redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                runpy.run_path(str(SCRIPT), run_name='__main__')
+        return raised.exception.code, stderr.getvalue()
+
+    def test_request_supersedes_older_unanswered(self):
+        first = self.old_request('2026-11-27T09:30:00Z')
+        second = self.old_request(PREVIOUS_SLOT)
+        result = self.request()
+        self.assertEqual(sorted(result['superseded']),
+                         sorted([f'archive/proj/{first}.json', f'archive/proj/{second}.json']))
+        self.assertEqual(result['supersede_conflicts'], [])
+        self.assertEqual(self.inbox_files(), [f'{self.request_id()}.json'])
+        self.assertEqual(self.archived_names(), sorted([f'{first}.json', f'{second}.json']))
+        archived = json.loads((self.root / 'archive' / 'proj' / f'{second}.json').read_text())
+        self.assertEqual((archived['id'], archived['slot']), (second, PREVIOUS_SLOT))
+
+    def test_request_supersedes_each_addressed_worker_separately(self):
+        self.register('other--b', 'other', 'sess-b')
+        mine = self.old_request()
+        theirs = self.old_request(project='other', session='sess-b')
+        result = self.request()
+        self.assertEqual(sorted(result['superseded']),
+                         sorted([f'archive/proj/{mine}.json', f'archive/other/{theirs}.json']))
+        self.assertEqual(self.archived_names('other'), [f'{theirs}.json'])
+
+    def test_request_keeps_answered_request(self):
+        for folder in ('inbox', 'archive'):
+            with self.subTest(reply_in=folder):
+                old = self.old_request()
+                reply_id = self.reply(folder=folder, in_reply_to=old)
+                result = self.request()
+                self.assertEqual((result['superseded'], result['supersede_conflicts']), ([], []))
+                self.assertEqual(self.older_names(), [f'{old}.json'])
+                (self.root / folder / 'orchestrator' / f'{reply_id}.json').unlink()
+                (self.root / 'inbox' / 'proj' / f'{old}.json').unlink()
+
+    def test_answer_to_previous_orchestrator_endpoint_counts(self):
+        old = self.old_request(orchestrator='old-orch')
+        self.reply(in_reply_to=old, to_session_id='old-orch')
+        result = self.request()
+        self.assertEqual(result['superseded'], [])
+        self.assertEqual(self.older_names(), [f'{old}.json'])
+
+    def test_answer_to_the_current_orchestrator_does_not_answer_a_request_of_another_endpoint(self):
+        old = self.old_request(orchestrator='old-orch')
+        self.reply(in_reply_to=old, to_session_id=ORCH)
+        result = self.request()
+        self.assertEqual(result['superseded'], [f'archive/proj/{old}.json'])
+
+    def test_reply_without_to_session_id_counts_as_an_answer(self):
+        old = self.old_request()
+        self.reply(in_reply_to=old, to_session_id=None)
+        self.assertEqual(self.request()['superseded'], [])
+        self.assertEqual(self.older_names(), [f'{old}.json'])
+
+    def test_reply_near_misses_do_not_answer(self):
+        cases = {
+            'id differs from the filename stem': {'id': str(uuid.uuid4())},
+            'naive created_at': {'created_at': '2026-11-27T10:09:00'},
+            'other worker': {'from_session_id': 'sess-z'},
+            'other project': {'from_project': 'other'},
+            'other recipient': {'to_session_id': 'someone-else'},
+            'not a status_report': {'type': 'note'},
+        }
+        for name, fields in cases.items():
+            with self.subTest(case=name):
+                old = self.old_request()
+                reply_id = self.reply(in_reply_to=old, **fields)
+                result = self.request()
+                (self.root / 'inbox' / 'orchestrator' / f'{reply_id}.json').unlink()
+                self.assertEqual(result['superseded'], [f'archive/proj/{old}.json'])
+                self.assertEqual(self.older_names(), [])
+                (self.root / 'archive' / 'proj' / f'{old}.json').unlink()
+
+    def test_reply_to_another_request_does_not_answer(self):
+        old = self.old_request()
+        self.reply(in_reply_to=self.request_id())
+        self.assertEqual(self.request()['superseded'], [f'archive/proj/{old}.json'])
+
+    def test_other_worker_and_non_request_untouched(self):
+        foreign = self.old_request(session='sess-z')
+        other_project = self.old_request(project='other', session='sess-b')
+        note = str(uuid.uuid4())
+        self.write(f'inbox/proj/{note}.json', {'id': note, 'type': 'task_request', 'slot': PREVIOUS_SLOT})
+        (self.root / 'inbox' / 'proj' / 'notes.txt').write_text('keep')
+        before = snapshot(self.root / 'inbox')
+        result = self.request()
+        self.assertEqual((result['superseded'], result['supersede_conflicts']), ([], []))
+        after = snapshot(self.root / 'inbox')
+        for name in (f'other/{other_project}.json', f'proj/{foreign}.json', f'proj/{note}.json', 'proj/notes.txt'):
+            self.assertEqual(after[name], before[name])
+        self.assertFalse((self.root / 'archive').exists())
+
+    def test_older_request_near_misses_stay_in_the_inbox(self):
+        other_id = str(uuid.uuid4())
+        outside = self.root / 'outside.json'
+        cases = {
+            'later slot': lambda: self.old_request('2026-11-27T10:15:00Z'),
+            'naive slot': lambda: self.old_request('2026-11-27T09:45:00'),
+            'misaligned slot': lambda: self.old_request('2026-11-27T09:50:00Z'),
+            'unparseable slot': lambda: self.old_request('soon'),
+            'missing slot': lambda: self.old_request(None),
+            'id not derived from the slot': lambda: self.old_request(id=other_id, name=other_id),
+            'id differs from the filename': lambda: self.old_request(id=other_id),
+            'executable': lambda: self.old_request(executable=True),
+            'executable missing': lambda: self.old_request(executable=None),
+            'not from the orchestrator': lambda: self.old_request(**{'from': 'worker'}),
+            'no orchestrator endpoint': lambda: self.old_request(from_session_id=None),
+            'other recipient project': lambda: self.old_request(to_project='other'),
+            'other recipient endpoint': lambda: self.old_request(to_session_id='sess-z'),
+            'other type': lambda: self.old_request(type='task_request'),
+            'filename not a uuid': lambda: self.old_request(name='older-request'),
+        }
+        for name, build in cases.items():
+            with self.subTest(case=name):
+                build()
+                before = snapshot(self.root / 'inbox' / 'proj')
+                result = self.request()
+                self.assertEqual((result['superseded'], result['supersede_conflicts']), ([], []))
+                self.assertEqual(self.archived_names(), [])
+                after = snapshot(self.root / 'inbox' / 'proj')
+                self.assertEqual({key: after[key] for key in before}, before)
+                for leftover in (self.root / 'inbox' / 'proj').iterdir():
+                    leftover.unlink()
+        with self.subTest(case='symlink'):
+            valid = status_round.build_request(PREVIOUS_SLOT, 'proj', 'sess-a', ORCH, '2026-11-27T09:50:00Z')
+            outside.write_text(json.dumps(valid))
+            link = self.root / 'inbox' / 'proj' / f'{valid["id"]}.json'
+            link.symlink_to(outside)
+            result = self.request()
+            self.assertEqual(result['superseded'], [])
+            self.assertTrue(link.is_symlink())
+        with self.subTest(case='not an object'):
+            link.unlink()
+            (self.root / 'inbox' / 'proj' / f'{valid["id"]}.json').write_text('["x"]')
+            self.assertEqual(self.request()['superseded'], [])
+
+    def test_later_slot_request_is_kept_and_counted_in_the_inbox(self):
+        later = self.old_request('2026-11-27T10:15:00Z')
+        earlier = self.old_request('2026-11-27T09:30:00Z')
+        result = self.request()
+        self.assertEqual(result['superseded'], [f'archive/proj/{earlier}.json'])
+        self.assertEqual(self.inbox_files(), sorted([f'{later}.json', f'{self.request_id()}.json']))
+
+    def test_same_slot_rerun_noop(self):
+        self.old_request()
+        first = self.request()
+        self.assertEqual(len(first['superseded']), 1)
+        before = snapshot(self.root)
+        second = self.request()
+        self.assertEqual((second['superseded'], second['supersede_conflicts']), ([], []))
+        self.assertEqual(snapshot(self.root), before)
+
+    def test_existing_archive_name_listed_as_conflict(self):
+        old = self.old_request()
+        archived = self.write(f'archive/proj/{old}.json', {'archived': 'earlier'})
+        before = archived.read_bytes()
+        result = self.request()
+        self.assertEqual(result['superseded'], [])
+        self.assertEqual(result['supersede_conflicts'], [f'inbox/proj/{old}.json'])
+        self.assertEqual(archived.read_bytes(), before)
+        self.assertEqual(self.older_names(), [f'{old}.json'])
+
+    def test_worker_archived_before_link_is_not_an_error_or_a_conflict(self):
+        old = self.old_request()
+        with mock.patch.object(os, 'link', side_effect=self.real_link_unless_archiving(FileNotFoundError)):
+            result = self.request()
+        self.assertEqual((result['superseded'], result['supersede_conflicts']), ([], []))
+        self.assertEqual(self.archived_names(), [])
+        self.assertTrue((self.root / 'inbox' / 'proj' / f'{old}.json').exists())
+
+    def real_link_unless_archiving(self, error):
+        real_link = os.link
+
+        def link(source, target):
+            if Path(target).parent.parent.name == 'archive':
+                raise error
+            return real_link(source, target)
+
+        return link
+
+    def test_worker_archived_between_link_and_unlink_is_not_an_error(self):
+        old = self.old_request()
+        source = self.root / 'inbox' / 'proj' / f'{old}.json'
+        real_link = os.link
+
+        def link_then_worker_removes_inbox_copy(origin, target):
+            real_link(origin, target)
+            if Path(target).parent.parent.name == 'archive':
+                source.unlink()
+
+        with mock.patch.object(os, 'link', side_effect=link_then_worker_removes_inbox_copy):
+            result = self.request()
+        self.assertEqual(result['supersede_conflicts'], [])
+        self.assertEqual(self.older_names(), [])
+        self.assertEqual(self.archived_names(), [f'{old}.json'])
+
+    def test_archive_symlink_refused_before_mkdir(self):
+        outside = self.root.parent / f'{self.root.name}-outside'
+        self.addCleanup(lambda: outside.exists() and outside.rmdir())
+        outside.mkdir()
+        cases = {
+            'archive': (self.root / 'archive', outside),
+            'archive project': (self.root / 'archive' / 'proj', outside),
+        }
+        for name, (link, target) in cases.items():
+            with self.subTest(case=name):
+                old = self.old_request()
+                link.parent.mkdir(exist_ok=True)
+                link.symlink_to(target)
+                with self.assertRaises(MailboxError) as raised:
+                    self.request()
+                self.assertEqual(str(raised.exception), MAILBOX_LINE)
+                self.assertEqual(list(outside.iterdir()), [])
+                self.assertTrue((self.root / 'inbox' / 'proj' / f'{old}.json').exists())
+                link.unlink()
+                (self.root / 'inbox' / 'proj' / f'{old}.json').unlink()
+
+    def test_dangling_archive_symlink_is_not_created_through(self):
+        missing = self.root.parent / f'{self.root.name}-missing'
+        self.old_request()
+        (self.root / 'archive').symlink_to(missing)
+        with self.assertRaises(MailboxError):
+            self.request()
+        self.assertFalse(missing.exists())
+
+    def test_archive_project_regular_file_ends_with_the_fixed_failure_line(self):
+        old = self.old_request()
+        self.write('archive/proj', {'not': 'a directory'})
+        code, stderr = self.run_as_script('request', '--endpoint', ORCH, '--at', AT)
+        self.assertEqual(code, FAILURE_LINE)
+        self.assertEqual(stderr, '')
+        self.assertTrue((self.root / 'inbox' / 'proj' / f'{old}.json').exists())
+
+    def test_missing_orchestrator_inbox_ends_with_the_mailbox_line_and_archives_nothing(self):
+        old = self.old_request()
+        (self.root / 'inbox' / 'orchestrator').rmdir()
+        completed = self.run_cli('request', '--endpoint', ORCH, '--at', AT)
+        self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
+                         (1, '', MAILBOX_LINE + '\n'))
+        self.assertTrue((self.root / 'inbox' / 'proj' / f'{self.request_id()}.json').exists())
+        self.assertEqual(self.older_names(), [f'{old}.json'])
+        self.assertFalse((self.root / 'archive').exists())
+
+    def test_archive_regular_file_ends_with_the_fixed_failure_line(self):
+        self.old_request()
+        (self.root / 'archive').write_text('not a directory')
+        completed = self.run_cli('request', '--endpoint', ORCH, '--at', AT)
+        self.assertEqual((completed.returncode, completed.stderr, completed.stdout),
+                         (1, FAILURE_LINE + '\n', ''))
+
+    def test_raw_os_error_text_is_never_printed_when_archiving_fails(self):
+        self.old_request()
+        real_link = os.link
+        raw = f'Input/output error: {self.root}/archive/proj'
+
+        def failing_link(source, target):
+            if Path(target).parent.parent.name == 'archive':
+                raise OSError(5, raw, str(target))
+            return real_link(source, target)
+
+        with mock.patch.object(os, 'link', side_effect=failing_link):
+            code, stderr = self.run_as_script('request', '--endpoint', ORCH, '--at', AT)
+        self.assertEqual(code, FAILURE_LINE)
+        self.assertNotIn('Input/output', f'{code}{stderr}')
+        self.assertNotIn(str(self.root), f'{code}{stderr}')
+
+    def test_raw_os_error_text_is_never_printed_when_the_inbox_copy_cannot_be_removed(self):
+        old = self.old_request()
+        real_unlink = Path.unlink
+
+        def failing_unlink(path, *args, **kwargs):
+            if path.name == f'{old}.json':
+                raise PermissionError(13, 'Permission denied', str(path))
+            return real_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, 'unlink', failing_unlink):
+            code, stderr = self.run_as_script('request', '--endpoint', ORCH, '--at', AT)
+        self.assertEqual(code, FAILURE_LINE)
+        self.assertNotIn('Permission denied', f'{code}{stderr}')
+        self.assertNotIn(str(self.root), f'{code}{stderr}')
+
+    def test_round_without_candidates_does_not_need_the_orchestrator_inbox(self):
+        (self.root / 'inbox' / 'orchestrator').rmdir()
+        result = self.request()
+        self.assertEqual(result['published'], [f'inbox/proj/{self.request_id()}.json'])
+        self.assertEqual((result['superseded'], result['supersede_conflicts']), ([], []))
+
+    def test_collect_unchanged_by_superseding(self):
+        self.old_request()
+        self.request()
+        before = snapshot(self.root)
+        report = self.collect()
+        self.assertEqual(set(report), {'slot', 'workers', 'missing', 'decisions_needed', 'incomplete'})
+        self.assertEqual(report['missing'], [{'project': 'proj', 'session_id': 'sess-a',
+                                              'request': self.request_id()}])
+        self.assertEqual(snapshot(self.root), before)
+
+    def test_cli_prints_the_superseding_result(self):
+        old = self.old_request()
+        completed = self.run_cli('request', '--endpoint', ORCH, '--at', AT)
+        self.assertEqual(completed.returncode, 0)
+        printed = json.loads(completed.stdout)
+        self.assertEqual(printed['superseded'], [f'archive/proj/{old}.json'])
+        self.assertEqual(printed['supersede_conflicts'], [])
 
 
 class ProtocolIntegrationTest(StatusRoundTestCase):

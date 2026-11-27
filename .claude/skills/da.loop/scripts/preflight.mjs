@@ -19,8 +19,7 @@ const LOOP_FILES = ['da.loop/SKILL.md', 'da.loop/lessons.md', 'da.loop/reference
     'da.loop/references/stack.md', 'da.merge/SKILL.md', 'da.commit/SKILL.md',
     'da.jira.comment/SKILL.md', 'da.jira.retro/SKILL.md', 'da.jira.estimate.hh/SKILL.md',
     'da.sync/SKILL.md', 'da.sync/scripts/sync-da.mjs', 'da.sync/scripts/sync-da.test.mjs',
-    'da.sync/assets/lessons.template.md', 'da.loop.sync/SKILL.md', 'da.loop.sync/scripts/loop-sync.mjs',
-    'da.loop.sync/scripts/loop-sync.test.mjs'];
+    'da.sync/assets/lessons.template.md'];
 const HOOK_FILES = ['.claude/hooks/path-guard.py', '.claude/skills/da.loop/scripts/g1-spec-review-hook.mjs',
     '.claude/skills/da.loop/scripts/run-close-hook.mjs', '.claude/skills/da.loop/scripts/adr-gate-hook.mjs'];
 const RENDERER = '.claude/skills/da.loop/scripts/render-agents.mjs';
@@ -38,7 +37,7 @@ const HOST_FILES = {
         ...BOOKS.map((b) => `.agents/skills/${b}/SKILL.md`), '.agents/skills/da.loop/SKILL.md',
         '.agents/skills/da.merge/SKILL.md', '.agents/skills/da.commit/SKILL.md', '.agents/skills/da.jira.comment/SKILL.md',
         '.agents/skills/da.jira.retro/SKILL.md', '.agents/skills/da.jira.estimate.hh/SKILL.md',
-        '.agents/skills/da.sync/SKILL.md', '.agents/skills/da.loop.sync/SKILL.md'],
+        '.agents/skills/da.sync/SKILL.md'],
     copilot: ['AGENTS.md', '.github/hooks/da-loop.json', ...AGENTS.map((a) => `.github/agents/${a}.agent.md`)],
 };
 // Paths each dashboard component needs; the repository is one module run from its root through `make`.

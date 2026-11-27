@@ -7,7 +7,10 @@ Usage:
 
 `request` publishes one non-executable status_request into inbox/<project>/ for every worker
 registered in sessions/*.json. The message id is derived from the slot, the project and the worker endpoint,
-so a rerun within the same slot publishes nothing and touches no file. A message already present in the
+so a rerun within the same slot publishes nothing and touches no file. It then moves every older
+unanswered status_request of each addressed worker from the inbox into archive/<project>/ (listed under
+superseded; an archive name already taken leaves the inbox file and lists it under supersede_conflicts), so at
+most one unanswered request per worker stays pending. A message already present in the
 inbox or the archive is never overwritten. The request asks for a status report and, when the worker is
 blocked, for the context of the blocker and one concrete question the orchestrator can decide.
 
@@ -235,8 +238,107 @@ def request_round(root, orchestrator_endpoint, moment):
         message = build_request(slot, project, endpoint, orchestrator_endpoint, created_at)
         state = publish_new(root, project, message)
         outcome[state].append(f'inbox/{project}/{message["id"]}.json')
+    superseded, conflicts = supersede_older_requests(root, workers, slot)
     return {'slot': slot, 'published': outcome['published'], 'existing': outcome['existing'],
-            'skipped': rejected}
+            'skipped': rejected, 'superseded': superseded, 'supersede_conflicts': conflicts}
+
+
+def older_slot(text, current_slot):
+    """True when text is a 15-minute aligned timezone-aware UTC slot earlier than current_slot."""
+    moment = parse_aware(text)
+    return moment is not None and moment == floor_to_slot(moment) and moment < parse_aware(current_slot)
+
+
+def own_request(path, project, endpoint, current_slot):
+    """The older status_request this orchestrator addressed to the worker at path, or None."""
+    if not receive.UUID.fullmatch(path.stem):
+        return None
+    message = receive.read_json(path)
+    if not isinstance(message, dict):
+        return None
+    slot = message.get('slot')
+    if (message.get('type') != 'status_request' or message.get('from') != 'orchestrator'
+            or message.get('to_project') != project or message.get('to_session_id') != endpoint
+            or message.get('executable') is not False
+            or not isinstance(message.get('from_session_id'), str)
+            or not older_slot(slot, current_slot)):
+        return None
+    if message.get('id') != path.stem or path.stem != request_id(slot, project, endpoint):
+        return None
+    return message
+
+
+def older_requests(root, worker, current_slot):
+    """The older status_requests of the worker in its inbox as (path, record) pairs."""
+    project, endpoint = worker
+    inbox = root / 'inbox' / project
+    found = []
+    for path in sorted(inbox.glob('*.json')):
+        message = own_request(path, project, endpoint, current_slot)
+        if message:
+            found.append((path, message))
+    return found
+
+
+def reply_index(root):
+    """Every readable orchestrator reply, grouped by the request id it answers."""
+    index = {}
+    for path in reply_files(root):
+        message = receive.read_json(path)
+        if isinstance(message, dict) and isinstance(message.get('in_reply_to'), str):
+            index.setdefault(message['in_reply_to'], []).append((path, message))
+    return index
+
+
+def is_answered(request, worker, replies, projects):
+    project, endpoint = worker
+    return any(is_reply_to_worker(message, path, projects, project, endpoint, request['id'],
+                                  request['from_session_id'])
+               for path, message in replies.get(request['id'], []))
+
+
+def archive_dir(root, project):
+    """archive/<project>/, created when missing; a symbolic link or an escaping path is refused."""
+    folder = root / 'archive'
+    for part in (folder, folder / project):
+        if os.path.lexists(part) and (part.is_symlink() or part.resolve() != part):
+            raise MailboxError(MAILBOX_LINE)
+        part.mkdir(exist_ok=True)
+        if part.is_symlink() or part.resolve() != part or not part.is_dir():
+            raise MailboxError(MAILBOX_LINE)
+    return folder / project
+
+
+def archive_request(root, path, project):
+    """'moved', 'conflict' (archive name taken) or 'gone' (the worker archived it first)."""
+    target = archive_dir(root, project) / path.name
+    try:
+        os.link(path, target)
+    except FileExistsError:
+        return 'conflict'
+    except FileNotFoundError:
+        return 'gone'
+    path.unlink(missing_ok=True)
+    return 'moved'
+
+
+def supersede_older_requests(root, workers, current_slot):
+    """Archive each worker's older unanswered requests; returns (archived paths, conflicting paths)."""
+    pending = [(worker, path, message) for worker in workers
+               for path, message in older_requests(root, worker, current_slot)]
+    if not pending:
+        return [], []
+    replies, projects = reply_index(root), project_registry(root)
+    superseded, conflicts = [], []
+    for worker, path, message in pending:
+        if is_answered(message, worker, replies, projects):
+            continue
+        state = archive_request(root, path, worker[0])
+        if state == 'moved':
+            superseded.append(f'archive/{worker[0]}/{path.name}')
+        elif state == 'conflict':
+            conflicts.append(relative(root, path))
+    return superseded, conflicts
 
 
 def reply_files(root):
