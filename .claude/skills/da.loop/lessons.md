@@ -50,6 +50,7 @@ One row per completed run. Numbers come from the run log, never from estimates.
 | 2026-11-26 | `dependency-card-hover.md` | MEDIUM | da.loop@2026-11-23.1 | 7, max parallel 2 | 1 | 0 | 0 unresolved | 0 | unavailable | 335s | 0 / 0 / 0 / 0 | 1 |
 | 2026-11-27 | `status-round.md` | HIGH | da.loop@2026-11-23.1 | 8 runs (4 agents), max parallel 1 | 4 | 0 | spec BLOCK then PASS; final BLOCK (2) fixed then PASS | 0 | 306003 subagent, main unavailable | see run log | 1 / 1 / 0 / 0 | 1 |
 | 2026-11-27 | `context-graph.md` | HIGH | da.loop@2026-11-23.1 | 12 runs (6 agents), max parallel 2 | 5 | 0 | spec BLOCK (2) then PASS; final BLOCK (1) fixed then PASS | 0 | 704981 subagent, main unavailable | see run log | 0 / 0 / 0 / 0 | 1 |
+| 2026-11-27 | `findings-followup.md` | HIGH | da.loop@2026-11-23.1 | 7 runs (4 agents), max parallel 1 | 1 | 0 | spec BLOCK then PASS; final PASS (2 SHOULD_FIX fixed) | 0 | 406465 subagent, main unavailable | see run log | 0 / 0 / 0 / 0 | 1 |
 
 ## Lessons
 
