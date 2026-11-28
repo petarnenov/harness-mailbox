@@ -5,7 +5,7 @@ user-invocable: false
 globs: []
 ---
 
-RULEBOOK: da-python@2026-11-27.2
+RULEBOOK: da-python@2026-11-28.2
 
 # Python production rules
 
@@ -26,6 +26,8 @@ Apply these rules to production code in this repository: root modules `server.py
 - **§K2.6 (P1)** Scripts that write to Jira or AIO perform only the event types the workspace `AGENTS.md` allows, read tokens only from the documented local environment file and never print, log or persist them.
 - **§K2.7** (P2) When a workspace script publishes a request with a reply template, list in that template and in the workspace protocol docs every field that the reply's consumers validate, including the reply's id (K03).
 - **§K2.8** (P2) When a workspace script gains an import of a sibling script or dashboard code for a new feature, import it lazily so existing commands still run when it is missing or fails, and prove by an installed-layout subprocess run that the script writes no file it did not write before (K04).
+- **§K2.9** (P2) In workspace scripts, catch `RuntimeError` together with `OSError` and `ValueError` wherever a path or file failure is mapped to a fixed line or a warning, because `Path.resolve()` raises it for a symbolic link loop on Python before 3.13, which a host may run (K05).
+- **§K2.10** (P2) When a workspace script keeps the identity of a lock holder inside the lock file, empty that content when the holder ends and before a new holder is announced, and act on it only while the lock is held and two consecutive reads agree (K06).
 
 ## §K3. HTTP behavior
 - **§K3.1 (P1)** Keep the security headers on every response (`Content-Security-Policy` without inline script, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`) and serve only the allow-listed static files.
