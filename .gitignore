@@ -40,6 +40,8 @@ htmlcov/
 /deliveries/
 /jira-sync/
 /reports/
+/status-rounds/
+/.status-round-runner.lock
 
 # The workspace template holds no gate records
 /workspace/dispatch-gates/

@@ -19,7 +19,8 @@ reports as decisions for the orchestrator; a blocked report without a task, cont
 as incomplete. The orchestrator answers a decision with decisions/<task_id>/<report-id>.json and a
 non-executable reply; resuming work still goes through dispatch_task.py.
 
-The cadence is session driven: nothing runs in the background. Run `request` at each 15-minute slot.
+The cadence comes from status_round_runner.py, which runs `request` and `collect` for every 15-minute slot
+and records the results; `request` stays safe to run by hand, a rerun within a slot touches nothing.
 """
 import argparse
 import importlib

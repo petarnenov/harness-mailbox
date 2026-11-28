@@ -39,5 +39,7 @@ decisions
 deliveries
 jira-sync
 reports
+status-rounds
+.status-round-runner.lock
 
 .coverage-output
