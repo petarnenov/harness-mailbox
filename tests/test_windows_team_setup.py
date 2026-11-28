@@ -11,6 +11,80 @@ from uuid import uuid4
 INSTALLER = Path(__file__).resolve().parents[1] / 'workspace/copilot-mailbox/install-windows-command.ps1'
 IS_DISPOSABLE_WINDOWS = os.name == 'nt' and os.environ.get('TEAM_WINDOWS_DISPOSABLE_TEST') == '1'
 
+# Windows PowerShell 5.1 itself writes these two subtrees into the empty redirected hive on runner image
+# 20261123.321.1 (evidence: workflow run 46144728369); the installer does not write them.
+WINDOWS_POWERSHELL_SUBTREES = (
+    r'Software\Microsoft\Advanced INF Setup',
+    r'Software\Microsoft\Windows\CurrentVersion\Internet Settings',
+)
+
+
+def registry_parts(path):
+    return tuple(part.lower() for part in path.split('\\') if part)
+
+
+def join_registry_path(*names):
+    return '\\'.join(name for name in names if name)
+
+
+def is_expected_registry_key(relative_path):
+    parts = registry_parts(relative_path)
+    if parts in ((), ('environment',)):
+        return True
+    for subtree in map(registry_parts, WINDOWS_POWERSHELL_SUBTREES):
+        shorter = min(len(parts), len(subtree))
+        if parts[:shorter] == subtree[:shorter]:
+            return True
+    return False
+
+
+def is_registry_link(key):
+    import winreg
+    try:
+        winreg.QueryValueEx(key, 'SymbolicLinkValue')
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def child_key_names(key):
+    import winreg
+    names = []
+    while True:
+        try:
+            names.append(winreg.EnumKey(key, len(names)))
+        except OSError:
+            return names
+
+
+def read_registry_tree(root, relative_path=''):
+    """Return the keys under root, children first, and the links; a link is listed and never entered."""
+    import winreg
+    path = join_registry_path(root, relative_path)
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, winreg.REG_OPTION_OPEN_LINK, winreg.KEY_READ) as key:
+        if is_registry_link(key):
+            return [], [relative_path]
+        names = child_key_names(key)
+    keys, links = [], []
+    for name in names:
+        child_keys, child_links = read_registry_tree(root, join_registry_path(relative_path, name))
+        keys += child_keys
+        links += child_links
+    return keys + [relative_path], links
+
+
+def leads_to_link(relative_path, links):
+    parts = registry_parts(relative_path)
+    return any(registry_parts(link)[:len(parts)] == parts for link in links)
+
+
+def remove_registry_keys(root, keys, links):
+    import winreg
+    for relative_path in keys:
+        if not leads_to_link(relative_path, links):
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, join_registry_path(root, relative_path))
+
+
 # Redirect HKCU for this PowerShell process before invoking any installer code.
 ISOLATED_POWERSHELL = r"""
 $ErrorActionPreference = 'Stop'
@@ -56,12 +130,23 @@ class WindowsShimTests(unittest.TestCase):
         self.env_key = self.key_name + r'\Environment'
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, self.env_key) as key:
             winreg.SetValueEx(key, 'TEAM_TEST_ID', 0, winreg.REG_SZ, self.key_name)
-        self.addCleanup(winreg.DeleteKey, winreg.HKEY_CURRENT_USER, self.key_name)
-        self.addCleanup(winreg.DeleteKey, winreg.HKEY_CURRENT_USER, self.env_key)
+        self.addCleanup(self.remove_own_registry_tree)
         self.original_path = self.user_path('Environment')
         self.addCleanup(lambda: self.assertEqual(self.user_path('Environment'), self.original_path))
         self.shell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
         self.encoded = base64.b64encode(ISOLATED_POWERSHELL.encode('utf-16le')).decode('ascii')
+
+    def remove_own_registry_tree(self):
+        keys, links = read_registry_tree(self.key_name)
+        remove_registry_keys(self.key_name, keys, links)
+        unexpected_keys = [key for key in keys if not is_expected_registry_key(key)]
+        problems = []
+        if links:
+            problems.append(f'registry links left in place under {self.key_name}: {links}')
+        if unexpected_keys:
+            problems.append(f'unexpected registry keys under {self.key_name}: {unexpected_keys}')
+        if problems:
+            self.fail('; '.join(problems))
 
     @staticmethod
     def user_path(key_name):
