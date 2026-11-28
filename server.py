@@ -11,12 +11,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from dependency_graph import build_graph
-from delivery_process import STAGES, project_delivery
+from delivery_process import CLOSED_TASK_STATUSES, STAGES, project_delivery
 
 ROOT = Path(__file__).parent
 VENDORED_SCRIPTS = {f'/vendor/{name}': (f'vendor/{name}', 'text/javascript; charset=utf-8')
                     for name in ('pixi-8.23.0.min.js', 'pixi-unsafe-eval-8.23.0.min.js', 'gsap-3.15.1.min.js')}
-CLOSED_TASK_STATUSES = ('done', 'cancelled')
 STATUSES = ('pending', 'in_progress', 'blocked', 'awaiting_verification', 'verified_done', 'deferred')
 
 

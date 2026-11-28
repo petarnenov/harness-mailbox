@@ -5,6 +5,7 @@ import json
 
 STAGES = {'uninvestigated', 'investigating', 'ready', 'implementation', 'review', 'verification', 'complete', 'deferred', 'unknown'}
 TRACE_STEPS = ('written', 'reviewed', 'integrated', 'tested_integrated')
+CLOSED_TASK_STATUSES = ('done', 'cancelled')
 
 
 class _Text(HTMLParser):

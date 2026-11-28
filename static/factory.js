@@ -15,6 +15,10 @@ const factoryTexts = {
   libraryFailed: 'Factory animation could not be loaded.',
   notRecorded: 'not recorded',
   pausedPrefix: 'Paused · ',
+  currentState: 'Current state',
+  replay: 'Replay',
+  taskOnFloor: 'task on the floor',
+  tasksOnFloor: 'tasks on the floor',
   pauseButton: 'Pause',
   playButton: 'Play',
   roles: ['worker', 'writer + tests', 'reviewer', 'verifier']
@@ -35,7 +39,7 @@ const factoryPalettes = {
 };
 const factoryView = {
   shown: false, opening: false, opened: false, userPaused: false, speed: 1, ticket: 0,
-  app: null, plan: null, scene: null, layout: null, state: [], master: null,
+  app: null, full: null, scope: { limited: false, taskIds: new Set(), key: 'open' }, replayId: '', plan: null, scene: null, layout: null, state: [], master: null,
   playedIds: new Set(), playedCount: 0, width: 0, height: 0, failure: ''
 };
 const factoryScriptLoads = {};
@@ -156,7 +160,61 @@ function factoryPlan(payload) {
   const boxes = factoryUniqueBy(factoryList(source.boxes).map(item => factoryBox(item, laneIds)).filter(Boolean), box => box.taskId);
   const taskIds = new Set(boxes.map(box => box.taskId));
   const candidates = factoryUniqueBy(factoryList(source.events).map(item => factoryStep(item, taskIds)).filter(Boolean), step => step.id);
-  return { stations: factoryStations, lanes, boxes, steps: factoryConsistentSteps(candidates, boxes) };
+  return { mode: factoryText(source.mode) || '', stations: factoryStations, lanes, boxes, steps: factoryConsistentSteps(candidates, boxes) };
+}
+
+function factoryScopeFrom(selection) {
+  const source = selection && typeof selection === 'object' ? selection : {};
+  const taskIds = new Set(factoryList(source.scopedTasks).map(task => factoryText(task && task.id)).filter(Boolean));
+  const valued = [source.p, source.e, source.taskId, source.team, source.q].some(value => typeof value === 'string' && value !== '');
+  const limited = valued || factoryList(source.invalid).length > 0;
+  return { limited, taskIds, key: limited ? JSON.stringify([...taskIds].sort()) : 'open' };
+}
+
+function factoryBoxVisible(box, scope, replayId) {
+  if (replayId) return box.taskId === replayId;
+  return !scope.limited || scope.taskIds.has(box.taskId);
+}
+
+function factoryVisiblePlan(full, scope, replayId) {
+  const boxes = full.boxes.filter(box => factoryBoxVisible(box, scope, replayId));
+  const taskIds = new Set(boxes.map(box => box.taskId));
+  const laneIds = new Set(boxes.map(box => box.laneId));
+  const narrowed = scope.limited || replayId !== '';
+  return {
+    stations: full.stations,
+    lanes: narrowed ? full.lanes.filter(lane => laneIds.has(lane.sessionId)) : full.lanes,
+    boxes,
+    steps: full.steps.filter(step => taskIds.has(step.taskId))
+  };
+}
+
+function factoryLastStepIndex(full, taskId) {
+  return full.steps.reduce((found, step, index) => (step.taskId === taskId ? index : found), -1);
+}
+
+function factoryReplayOptions(full, scope) {
+  return full.boxes
+    .filter(box => factoryBoxVisible(box, scope, ''))
+    .map(box => ({ value: box.taskId, label: box.title + ' · ' + box.taskId.slice(0, 8), recency: factoryLastStepIndex(full, box.taskId) }))
+    .sort((first, second) => second.recency - first.recency);
+}
+
+function factoryReplayAvailable(full, scope, taskId) {
+  return factoryReplayOptions(full, scope).some(option => option.value === taskId);
+}
+
+function factoryIsFirstLoad(floorPlan, payloadPlan) {
+  return !floorPlan || floorPlan.mode !== payloadPlan.mode;
+}
+
+function factoryWorkLanes(plan, replayId) {
+  const working = lane => replayId !== '' || (lane.lastStatus !== null && lane.lastStatus.status === 'working');
+  return new Set(plan.lanes.flatMap((lane, index) => (working(lane) ? [index] : [])));
+}
+
+function factoryOnFloor(state) {
+  return state.filter(box => box.station !== null).length;
 }
 
 function factoryStateAfter(plan, count) {
@@ -176,8 +234,13 @@ function factoryRefusalCheckpoint(gate, station) {
   return station <= 1 ? 'g1' : 'g2';
 }
 
-function factoryStatusText(played, total, paused) {
-  const progress = played + ' of ' + total + ' events played';
+function factoryFloorStatusText(onFloor) {
+  const unit = onFloor === 1 ? factoryTexts.taskOnFloor : factoryTexts.tasksOnFloor;
+  return factoryTexts.currentState + ' · ' + onFloor + ' ' + unit;
+}
+
+function factoryReplayStatusText(title, played, total, paused) {
+  const progress = factoryTexts.replay + ' · ' + title + ' · event ' + played + ' of ' + total;
   return paused ? factoryTexts.pausedPrefix + progress : progress;
 }
 
@@ -476,7 +539,7 @@ function factoryCurrentStage(box) {
   return entry && entry.station !== null ? factoryStations[entry.station] : box.stage;
 }
 
-function factoryBuildScene(app, plan, layout, palette) {
+function factoryBuildScene(app, plan, layout, palette, workLanes) {
   const root = new PIXI.Container();
   app.stage.addChild(root);
   factoryDrawPanel(factoryGraphicsIn(root), { x: 0, y: 0, width: layout.width, height: layout.height }, palette.background, palette.background);
@@ -490,7 +553,7 @@ function factoryBuildScene(app, plan, layout, palette) {
   const boxes = {};
   plan.boxes.forEach(box => { boxes[box.taskId] = factoryBuildBox(root, box, layout, palette); });
   const fidget = gsap.to(productOwner, { rotation: 0.14, duration: 0.15, repeat: -1, yoyo: true, ease: 'none' });
-  return { root, palette, lanes, productOwner, office, car, refuseMark, boxes, work: {}, ambient: [fidget] };
+  return { root, palette, lanes, productOwner, office, car, refuseMark, boxes, workLanes, work: {}, ambient: [fidget] };
 }
 
 function factoryDisposeScene(scene) {
@@ -510,6 +573,10 @@ function factoryStartWork(scene, layout, taskId, place) {
   const tween = gsap.to(glyph, { x: spot.x, y: spot.y, duration: 0.5, repeat: -1, yoyo: true, ease: 'none' });
   scene.work[taskId] = { glyph, tween };
   factoryApplyClockTo(tween);
+}
+
+function factoryStartLaneWork(scene, layout, taskId, place) {
+  if (scene.workLanes.has(place.laneIndex)) factoryStartWork(scene, layout, taskId, place);
 }
 
 function factoryStopWork(scene, taskId) {
@@ -567,7 +634,7 @@ function factoryEnterStep(job) {
   timeline.call(() => { box.visible = true; factoryPlace(box, entrance.x + layout.hold, entrance.y); }, null, 0);
   factoryRideTo(timeline, scene.productOwner, { x: target.x - layout.hold, y: target.y }, 0, 0.5);
   factoryRideTo(timeline, box, target, 0, 0.5);
-  timeline.call(() => factoryStartWork(scene, layout, step.taskId, { laneIndex, station, slot }), null, 0.5);
+  timeline.call(() => factoryStartLaneWork(scene, layout, step.taskId, { laneIndex, station, slot }), null, 0.5);
   factoryRideTo(timeline, scene.productOwner, entrance, 0.5, 0.5);
   return timeline;
 }
@@ -578,7 +645,7 @@ function factoryMoveStep(job) {
   const station = factoryStations.indexOf(step.stage);
   timeline.call(() => factoryStopWork(scene, step.taskId), null, 0);
   factoryRideTo(timeline, scene.boxes[step.taskId], factorySlotPoint(layout, laneIndex, station, slot), 0, 0.85);
-  timeline.call(() => factoryStartWork(scene, layout, step.taskId, { laneIndex, station, slot }), null, 0.85);
+  timeline.call(() => factoryStartLaneWork(scene, layout, step.taskId, { laneIndex, station, slot }), null, 0.85);
   return timeline;
 }
 
@@ -598,7 +665,7 @@ function factoryRefuseStep(job) {
   factoryRageOwner(timeline, scene, 0.35);
   factoryFlowDollars(timeline, scene, 'out', 0.4);
   factoryRideTo(timeline, box, factorySlotPoint(layout, laneIndex, fromStation, fromSlot), 0.55, 0.4);
-  timeline.call(() => factoryStartWork(scene, layout, step.taskId, { laneIndex, station: fromStation, slot: fromSlot }), null, 0.95);
+  timeline.call(() => factoryStartLaneWork(scene, layout, step.taskId, { laneIndex, station: fromStation, slot: fromSlot }), null, 0.95);
   return timeline;
 }
 
@@ -661,7 +728,7 @@ function factoryPlaceBoxes(scene, layout, plan, state) {
     const spot = factorySlotPoint(layout, laneIndex, box.station, box.slot);
     display.visible = true;
     factoryPlace(display, spot.x, spot.y);
-    factoryStartWork(scene, layout, box.taskId, place);
+    factoryStartLaneWork(scene, layout, box.taskId, place);
   });
 }
 
@@ -705,11 +772,18 @@ function factoryApplyTicker() {
   else factoryView.app.ticker.stop();
 }
 
+function factoryProgressText() {
+  const view = factoryView;
+  if (!view.replayId) return factoryFloorStatusText(factoryOnFloor(view.state));
+  const box = view.plan.boxes[0];
+  return factoryReplayStatusText(box ? box.title : '', view.playedCount, view.plan.steps.length, view.userPaused);
+}
+
 function factoryUpdateStatus() {
   const view = factoryView;
-  const total = view.plan ? view.plan.steps.length : 0;
-  factoryElement('factory-status').textContent = view.failure || factoryStatusText(view.playedCount, total, view.userPaused);
+  factoryElement('factory-status').textContent = view.failure || factoryProgressText();
   factoryElement('factory-pause').textContent = view.userPaused ? factoryTexts.playButton : factoryTexts.pauseButton;
+  factoryElement('factory-pause').disabled = !view.replayId;
 }
 
 function factoryShowFailure(text) {
@@ -718,6 +792,7 @@ function factoryShowFailure(text) {
 }
 
 function factoryTogglePause() {
+  if (!factoryView.replayId) return;
   factoryView.userPaused = !factoryView.userPaused;
   factoryUpdateStatus();
   factoryApplyClock();
@@ -756,7 +831,7 @@ function factoryApplyPlan(plan) {
   if (view.master) view.master.kill();
   const { played, fresh } = factorySplitSteps(plan, view.playedIds);
   const layout = factoryLayout(plan.lanes.length, view.width, view.height);
-  const scene = factoryBuildScene(view.app, plan, layout, factoryPalette(factoryTheme()));
+  const scene = factoryBuildScene(view.app, plan, layout, factoryPalette(factoryTheme()), factoryWorkLanes(plan, view.replayId));
   const state = factoryStateAfter({ boxes: plan.boxes, steps: played }, played.length);
   factoryPlaceBoxes(scene, layout, plan, state);
   Object.assign(view, { plan, scene, layout, state, playedCount: played.length });
@@ -782,11 +857,76 @@ async function factoryRefreshData() {
   }
   if (ticket !== factoryView.ticket) return;
   factoryView.failure = '';
-  factoryApplyPlan(plan);
+  factoryAdoptPayload(plan);
+  factoryFillReplayOptions();
+  factoryDrawVisible();
+}
+
+function factoryShowCurrentState() {
+  const view = factoryView;
+  view.replayId = '';
+  view.userPaused = false;
+  view.playedIds = new Set(view.full.steps.map(step => step.id));
+}
+
+function factoryStartReplay(taskId) {
+  factoryView.replayId = taskId;
+  factoryView.playedIds = new Set();
+}
+
+function factoryCountHiddenEventsPlayed() {
+  const view = factoryView;
+  const visible = new Set(factoryVisiblePlan(view.full, view.scope, '').boxes.map(box => box.taskId));
+  view.full.steps.filter(step => !visible.has(step.taskId)).forEach(step => view.playedIds.add(step.id));
+}
+
+function factoryAdoptPayload(full) {
+  const view = factoryView;
+  const firstLoad = factoryIsFirstLoad(view.full, full);
+  view.full = full;
+  if (firstLoad || (view.replayId && !factoryReplayAvailable(full, view.scope, view.replayId))) factoryShowCurrentState();
+  else if (!view.replayId) factoryCountHiddenEventsPlayed();
+}
+
+function factoryFillReplayOptions() {
+  const view = factoryView;
+  const newOption = (value, label) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    return option;
+  };
+  const options = factoryReplayOptions(view.full, view.scope).map(option => newOption(option.value, option.label));
+  const select = factoryElement('factory-replay');
+  select.replaceChildren(newOption('', factoryTexts.currentState), ...options);
+  select.value = view.replayId;
+}
+
+function factoryDrawVisible() {
+  const view = factoryView;
+  factoryApplyPlan(factoryVisiblePlan(view.full, view.scope, view.replayId));
+}
+
+function factoryChooseReplay() {
+  const view = factoryView;
+  if (!view.full) return;
+  const taskId = factoryElement('factory-replay').value;
+  if (taskId !== '' && factoryReplayAvailable(view.full, view.scope, taskId)) factoryStartReplay(taskId);
+  else factoryShowCurrentState();
+  factoryFillReplayOptions();
+  factoryDrawVisible();
+}
+
+function factoryApplyScopeChange() {
+  const view = factoryView;
+  const keepsReplay = view.replayId !== '' && factoryReplayAvailable(view.full, view.scope, view.replayId);
+  if (!keepsReplay) factoryShowCurrentState();
+  factoryFillReplayOptions();
+  if (!keepsReplay) factoryDrawVisible();
 }
 
 function factoryRedraw() {
-  if (factoryView.opened && factoryView.plan) factoryApplyPlan(factoryView.plan);
+  if (factoryView.opened && factoryView.full) factoryDrawVisible();
 }
 
 function factoryResize() {
@@ -810,6 +950,7 @@ async function factoryCreateApp() {
 function factoryListen() {
   factoryElement('factory-pause').addEventListener('click', factoryTogglePause);
   factoryElement('factory-speed').addEventListener('change', factorySetSpeed);
+  factoryElement('factory-replay').addEventListener('change', factoryChooseReplay);
   factoryElement('theme-toggle').addEventListener('click', factoryRedraw);
   window.addEventListener('resize', factoryResize);
 }
@@ -844,6 +985,14 @@ function factorySetShown(shown) {
     factoryApplyClock();
   }
   if (shown) factoryResize();
+}
+
+function factorySetScope(selection) {
+  const view = factoryView;
+  const scope = factoryScopeFrom(selection);
+  const changed = scope.key !== view.scope.key;
+  view.scope = scope;
+  if (changed && view.opened && view.full) factoryApplyScopeChange();
 }
 
 function factoryRefresh() {

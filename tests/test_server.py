@@ -990,12 +990,15 @@ class ContextCompositionTests(Fixture):
         self.assertEqual(without, with_records)
 
 
+import re  # noqa: E402
 from datetime import datetime  # noqa: E402  imported here so the lines of the existing tests keep their numbers
 
+import delivery_process  # noqa: E402
+
 try:
-    from factory_fixture import write_mailbox  # noqa: E402
+    from factory_fixture import CANCELLED, COMPLETE, write_mailbox  # noqa: E402
 except ModuleNotFoundError:  # run as tests.test_server from the repository root
-    from tests.factory_fixture import write_mailbox  # noqa: E402
+    from tests.factory_fixture import CANCELLED, COMPLETE, write_mailbox  # noqa: E402
 
 
 class FactoryApiTests(Fixture):
@@ -1060,6 +1063,13 @@ class FactoryApiTests(Fixture):
             self.assertTrue(payload[name])
             for item in payload[name]:
                 self.assertEqual(keys, set(item))
+
+    def test_the_boxes_list_no_cancelled_task_that_never_completed(self):
+        payload = json.loads(self.get('/api/factory')[1])
+        box_ids = [box['task_id'] for box in payload['boxes']]
+        self.assertNotIn(CANCELLED, box_ids)
+        self.assertNotIn(CANCELLED, [event['task_id'] for event in payload['events']])
+        self.assertIn(COMPLETE, box_ids)
 
     def test_demo_mode_reads_the_demo_directory_and_answers_mode_demo(self):
         checkout = Path(self.temp.name) / 'checkout'
@@ -1149,13 +1159,20 @@ class FactoryApiTests(Fixture):
         tab_ids = [chunk.split('"')[0] for chunk in page.split('<a id="tab-')[1:]]
         self.assertEqual(['overview', 'dependencies', 'tasks', 'estimates', 'sources', 'factory'], tab_ids)
         self.assertIn('<section id="view-factory" class="page-view" role="tabpanel" aria-labelledby="tab-factory"', page)
-        for element_id in ('factory-pause', 'factory-speed', 'factory-status', 'factory-stage', 'factory-tooltip'):
+        for element_id in ('factory-pause', 'factory-speed', 'factory-replay', 'factory-status', 'factory-stage', 'factory-tooltip'):
             with self.subTest(element_id):
                 self.assertEqual(1, page.count('id="' + element_id + '"'))
+        pause_button = re.search(r'<button[^>]*id="factory-pause"[^>]*>', page).group(0)
+        self.assertRegex(pause_button, r'\sdisabled(\s|>|=)')
+        self.assertRegex(page, r'<select[^>]*id="factory-replay"[^>]*>\s*<option value="">Current state</option>')
         self.assertLess(page.index('<script src="/factory.js"></script>'), page.index('<script src="/app.js"></script>'))
 
 
 class FactoryCompositionTests(unittest.TestCase):
+    def test_the_closed_statuses_are_one_definition_shared_by_the_server_and_the_delivery_process(self):
+        self.assertIs(delivery_process.CLOSED_TASK_STATUSES, server.CLOSED_TASK_STATUSES)
+        self.assertEqual(('done', 'cancelled'), server.CLOSED_TASK_STATUSES)
+
     def test_importing_server_does_not_import_the_factory_floor(self):
         checkout = Path(server.__file__).resolve().parent
         probe = 'import sys, server, dispatch_gate; sys.exit(1 if "factory_floor" in sys.modules else 0)'
