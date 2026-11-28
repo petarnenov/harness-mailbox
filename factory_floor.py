@@ -8,6 +8,7 @@ from collections import Counter
 from datetime import timezone
 
 from context_graph import MESSAGE_BOXES, aware_time, first_text, identifier, nonempty_text, read_records, relative, text
+from delivery_process import CLOSED_TASK_STATUSES
 
 STATIONS = ('investigating', 'implementation', 'review', 'verification')
 STATUS_VALUES = ('working', 'idle', 'waiting', 'blocked')
@@ -195,6 +196,15 @@ def duplicated_task_ids(tasks):
     return {task_id for task_id, count in counts.items() if count > 1}
 
 
+def is_exit(event):
+    return event['kind'] == 'exit'
+
+
+def closed_without_exit(task, keyed):
+    """A closed task record whose events never reached complete stands nowhere on the floor."""
+    return task.get('status') in CLOSED_TASK_STATUSES and not any(is_exit(event) for _key, event in keyed)
+
+
 def build_factory(dashboard, root, read_json, mode):
     """The GET /api/factory payload for a dashboard projection and the mailbox root."""
     warnings = []
@@ -208,7 +218,7 @@ def build_factory(dashboard, root, read_json, mode):
             warnings.append(f"{task['source']}: {DUPLICATE_TASK_IDENTITY}")
             continue
         task_keyed = keyed_events_of_task(root, task['id'], read_json, warnings)
-        if task_keyed:
+        if task_keyed and not closed_without_exit(task, task_keyed):
             boxes.append(box_of(task))
             keyed_events += task_keyed
     events = [event for _key, event in sorted(keyed_events, key=lambda keyed: keyed[0])]

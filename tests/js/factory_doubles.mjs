@@ -171,6 +171,7 @@ class ElementDouble {
     this.tagName = tagName;
     this.textContent = '';
     this.hidden = false;
+    this.disabled = false;
     this.value = '';
     this.checked = false;
     this.open = false;

@@ -34,8 +34,8 @@ class FactoryCase(unittest.TestCase):
     def put(self, relative, record):
         return fixture.put(self.root, relative, record)
 
-    def task(self, task_id, stages_at, decisions=None, owner=ALPHA, project='proj-alpha'):
-        fixture.put_task(self.root, project, task_id, owner, stages_at, decisions)
+    def task(self, task_id, stages_at, decisions=None, owner=ALPHA, project='proj-alpha', status='in_progress'):
+        fixture.put_task(self.root, project, task_id, owner, stages_at, decisions, status)
 
     def owned_task_record(self, task_id, owner=ALPHA):
         self.put(f'tasks/proj-alpha/{task_id}.json', {'id': task_id, 'project': 'proj-alpha', 'owner_session_id': owner})
@@ -138,6 +138,42 @@ class LaneTests(FactoryCase):
                 self.put(f'deliveries/{task_id}.json', {'delivery_stage': 'investigating', 'history': fixture.history(('investigating', 1))})
                 payload = self.payload()
                 self.assertEqual(([], []), (payload['boxes'], payload['warnings']))
+
+
+class ClosedTaskTests(FactoryCase):
+    AT_STATION = [('investigating', 1), ('implementation', 2)]
+    COMPLETED = [('investigating', 1), ('implementation', 2), ('review', 3), ('verification', 4), ('complete', 5)]
+
+    def box_ids(self):
+        return [box['task_id'] for box in self.payload()['boxes']]
+
+    def test_a_cancelled_task_without_a_complete_entry_has_no_box_and_no_events(self):
+        self.task('T-1', self.AT_STATION, status='cancelled')
+        self.assertEqual(([], []), (self.box_ids(), self.events_of('T-1')))
+
+    def test_a_done_task_without_a_complete_entry_has_no_box_and_no_events(self):
+        self.task('T-1', self.AT_STATION, status='done')
+        self.assertEqual(([], []), (self.box_ids(), self.events_of('T-1')))
+
+    def test_a_closed_task_that_reached_complete_keeps_its_box_and_its_exit(self):
+        for status in ('done', 'cancelled'):
+            with self.subTest(status):
+                self.task('T-1', self.COMPLETED, status=status)
+                self.assertEqual(['T-1'], self.box_ids())
+                self.assertEqual(('exit', 'verification'), self.steps_of('T-1')[-1])
+
+    def test_an_open_task_at_a_station_keeps_its_box(self):
+        for status in ('in_progress', 'pending', 'blocked', 'awaiting_verification', 'deferred'):
+            with self.subTest(status):
+                self.task('T-1', self.AT_STATION, status=status)
+                self.assertEqual(['T-1'], self.box_ids())
+                self.assertEqual([('enter', 'investigating'), ('move', 'implementation')], self.steps_of('T-1'))
+
+    def test_the_cancelled_fixture_task_has_no_box_and_leaves_the_other_boxes_in_place(self):
+        self.full_mailbox()
+        self.assertNotIn(fixture.CANCELLED, self.box_ids())
+        self.assertEqual([], self.events_of(fixture.CANCELLED))
+        self.assertEqual(EVERY_FIXTURE_TASK, self.box_ids())
 
 
 class EventTests(FactoryCase):

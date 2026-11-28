@@ -100,6 +100,23 @@ async function openFactory(page, payload) {
   return view(page);
 }
 
+const SELECTION = { p: '', e: '', taskId: '', team: '', q: '', invalid: [], scopedTasks: [] };
+const scopeOf = (...taskIds) => ({ ...SELECTION, p: 'alpha', scopedTasks: taskIds.map(id => ({ id })) });
+const setScope = (page, selection) => page.call('factorySetScope', selection);
+
+async function chooseReplay(page, taskId) {
+  const select = page.element('factory-replay');
+  select.value = taskId;
+  select.fire('change');
+  await flush();
+  return view(page);
+}
+
+async function openReplay(page, payload, taskId) {
+  await openFactory(page, payload);
+  return chooseReplay(page, taskId);
+}
+
 async function refreshWith(page, payload) {
   page.eval('factoryRefresh()');
   page.requestTo('/api/factory').at(-1).resolve(okResponse(payload));
@@ -374,7 +391,6 @@ test('box tooltip names title, project and stage', async () => {
   assert.equal(tooltip.hidden, false);
   assert.deepEqual([tooltip.style.left, tooltip.style.top], ['114px', '134px']);
 
-  current.master.finish();
   current.scene.boxes.t4.emit('pointerover', { clientX: 100, clientY: 120 });
   assert.equal(tooltip.textContent, 'Title of t4\nProject: alpha\nStage: implementation');
   current.scene.boxes.t2.emit('pointerover', { clientX: 100, clientY: 120 });
@@ -415,11 +431,27 @@ test('tooltip position flips to the other side of the pointer near the right and
   assert.deepEqual(page.call('factoryTooltipPosition', 10, 10, 120, 48, 100, 40), { left: 0, top: 0 });
 });
 
-test('status text counts played events and marks the paused state', () => {
+test('status text of the current state counts the tasks on the floor', async () => {
   const page = newFactory();
 
-  assert.equal(page.call('factoryStatusText', 2, 5, false), '2 of 5 events played');
-  assert.equal(page.call('factoryStatusText', 2, 5, true), 'Paused · 2 of 5 events played');
+  assert.equal(page.call('factoryFloorStatusText', 0), 'Current state · 0 tasks on the floor');
+  assert.equal(page.call('factoryFloorStatusText', 1), 'Current state · 1 task on the floor');
+  assert.equal(page.call('factoryFloorStatusText', 3), 'Current state · 3 tasks on the floor');
+  await openFactory(page, fullPayload());
+  assert.equal(statusText(page), 'Current state · 3 tasks on the floor');
+});
+
+test('status text of a replay names the task and counts its events', async () => {
+  const page = newFactory();
+  const current = await openReplay(page, fullPayload(), 't1');
+
+  assert.equal(page.call('factoryReplayStatusText', 'Fix it', 2, 5, false), 'Replay · Fix it · event 2 of 5');
+  assert.equal(page.call('factoryReplayStatusText', 'Fix it', 2, 5, true), 'Paused · Replay · Fix it · event 2 of 5');
+  assert.equal(statusText(page), 'Replay · Title of t1 · event 0 of 3');
+  current.master.children()[0].finish();
+  assert.equal(statusText(page), 'Replay · Title of t1 · event 1 of 3');
+  page.element('factory-pause').fire('click');
+  assert.equal(statusText(page), 'Paused · Replay · Title of t1 · event 1 of 3');
 });
 
 test('titles and names are passed as text only', async () => {
@@ -467,7 +499,7 @@ test('compact layouts leave the role labels out and keep the gate labels', async
 
 test('pause stops the timeline and play resumes it', async () => {
   const page = newFactory();
-  const current = await openFactory(page, fullPayload());
+  const current = await openReplay(page, fullPayload(), 't1');
   current.master.finish();
   const clocked = () => [current.master, ...current.scene.ambient, ...Object.values(current.scene.work).map(work => work.tween)];
   const pause = page.element('factory-pause');
@@ -477,11 +509,11 @@ test('pause stops the timeline and play resumes it', async () => {
   pause.fire('click');
   assert.ok(Object.keys(current.scene.work).length > 0 && clocked().every(tween => tween.paused === true));
   assert.equal(pause.textContent, 'Play');
-  assert.match(statusText(page), /^Paused · 14 of 14 events played$/);
+  assert.equal(statusText(page), 'Paused · Replay · Title of t1 · event 3 of 3');
   pause.fire('click');
   assert.ok(clocked().every(tween => tween.paused === false));
   assert.equal(pause.textContent, 'Pause');
-  assert.equal(statusText(page), '14 of 14 events played');
+  assert.equal(statusText(page), 'Replay · Title of t1 · event 3 of 3');
 });
 
 test('speed sets the time scale', async () => {
@@ -504,7 +536,7 @@ test('speed sets the time scale', async () => {
 
 test('enter step brings the box with the product owner to its first station', async () => {
   const page = newFactory();
-  const current = await openFactory(page, payloadOf([lane('s1', 'alpha', 'Ada', null)], [box('t1', 's1', 'investigating')], [['t1/e', 't1', 'enter', 'investigating']]));
+  const current = await openReplay(page, payloadOf([lane('s1', 'alpha', 'Ada', null)], [box('t1', 's1', 'investigating')], [['t1/e', 't1', 'enter', 'investigating']]), 't1');
   const [timeline] = current.master.children();
   const target = slotPoint(page, 0, 0, 0);
   const entrance = plain(current.layout.entrance);
@@ -521,16 +553,14 @@ test('enter step brings the box with the product owner to its first station', as
   assert.equal(display.visible, true);
   assert.deepEqual(pointOf(display), target);
   assert.deepEqual(pointOf(current.scene.productOwner), entrance);
-  assert.equal(statusText(page), '1 of 1 events played');
+  assert.equal(statusText(page), 'Replay · Title of t1 · event 1 of 1');
   assert.deepEqual([...current.playedIds], ['t1/e']);
 });
 
 test('a box at a station makes that station robot work on it', async () => {
   const page = newFactory();
-  const current = await openFactory(page, fullPayload());
-  const second = current.master.children()[1];
+  const current = await openReplay(page, fullPayload(), 't1');
   playUntil(page, 't1/stage/investigating').finish();
-  second.finish();
 
   const work = current.scene.work.t1;
   const post = current.scene.lanes[0].robots[0];
@@ -539,7 +569,6 @@ test('a box at a station makes that station robot work on it', async () => {
   assert.equal(work.glyph.text, '</>');
   assert.deepEqual(pointOf(work.glyph), pointOf(post));
   assert.deepEqual([work.tween.target === work.glyph, work.tween.vars.x, work.tween.vars.y, work.tween.vars.repeat, work.tween.vars.yoyo], [true, spot.x, spot.y, -1, true]);
-  assert.equal(current.scene.work.t2 !== undefined, true);
 
   page.eval('factoryStopWork(factoryView.scene, "t1")');
   assert.deepEqual([work.tween.killed, work.glyph.destroyed, current.scene.work.t1], [true, true, undefined]);
@@ -548,7 +577,7 @@ test('a box at a station makes that station robot work on it', async () => {
 
 test('starting work on a box that already has a work loop replaces the old loop', async () => {
   const page = newFactory();
-  const current = await openFactory(page, fullPayload());
+  const current = await openReplay(page, fullPayload(), 't1');
   playUntil(page, 't1/stage/implementation');
   const first = current.scene.work.t1;
 
@@ -560,7 +589,7 @@ test('starting work on a box that already has a work loop replaces the old loop'
 
 test('move step rides the conveyor to the named station', async () => {
   const page = newFactory();
-  const current = await openFactory(page, fullPayload());
+  const current = await openReplay(page, fullPayload(), 't1');
   const timeline = playUntil(page, 't1/stage/implementation');
   const target = slotPoint(page, 0, 1, 0);
   const display = current.scene.boxes.t1;
@@ -582,7 +611,7 @@ test('refuse step rides to the checkpoint of its gate and back to the robot it c
   for (const [gate, station, checkpoint] of cases) {
     await t.test(gate + ' refusal at station ' + station + ' goes to ' + checkpoint, async () => {
       const page = newFactory();
-      const current = await openFactory(page, onePathPayload(station, gate));
+      const current = await openReplay(page, onePathPayload(station, gate), 't1');
       const timeline = playUntil(page, 't1/refuse/x');
       const display = current.scene.boxes.t1;
       const stop = plain(current.layout.lanes[0].checkpoints[checkpoint]);
@@ -603,26 +632,26 @@ test('refuse step rides to the checkpoint of its gate and back to the robot it c
 
 test('the box stays at its station after a refusal and returns to its own slot', async () => {
   const page = newFactory();
-  const payload = payloadOf([lane('s1', 'alpha', 'Ada', null)], [box('t1', 's1', 'a'), box('t2', 's1', 'a'), box('t3', 's1', 'a')], [
-    ['t1/e', 't1', 'enter', 'investigating'],
-    ['t2/e', 't2', 'enter', 'investigating'],
-    ['t2/refuse/x', 't2', 'refuse', 'investigating', 'report'],
-    ['t3/e', 't3', 'enter', 'investigating']
-  ]);
-  const current = await openFactory(page, payload);
+  const lanes = [lane('s1', 'alpha', 'Ada', null)];
+  const boxes = [box('t1', 's1', 'a'), box('t2', 's1', 'a'), box('t3', 's1', 'a')];
+  const placed = [['t1/e', 't1', 'enter', 'investigating'], ['t2/e', 't2', 'enter', 'investigating']];
+  const current = await openFactory(page, payloadOf(lanes, boxes, placed));
   const ownSlot = slotPoint(page, 0, 0, 1);
 
-  playUntil(page, 't2/refuse/x').finish();
+  await refreshWith(page, payloadOf(lanes, boxes, [...placed, ['t2/refuse/x', 't2', 'refuse', 'investigating', 'report'], ['t3/e', 't3', 'enter', 'investigating']]));
+  const [refusal, entry] = current.master.children();
+
+  refusal.finish();
   assert.deepEqual(pointOf(current.scene.boxes.t2), ownSlot);
   assert.deepEqual(current.state.filter(item => item.station !== null).map(item => [item.taskId, item.station, item.slot]), [['t1', 0, 0], ['t2', 0, 1]]);
-  current.master.children()[3].finish();
+  entry.finish();
   assert.deepEqual(pointOf(current.scene.boxes.t3), slotPoint(page, 0, 0, 2));
   assert.deepEqual(pointOf(current.scene.boxes.t2), ownSlot);
 });
 
 test('exit step carries the box through the door, the car leaves and the box is removed', async () => {
   const page = newFactory();
-  const current = await openFactory(page, fullPayload());
+  const current = await openReplay(page, fullPayload(), 't2');
   const timeline = playUntil(page, 't2/exit');
   const { scene, layout } = current;
   const display = scene.boxes.t2;
@@ -644,7 +673,7 @@ test('exit step carries the box through the door, the car leaves and the box is 
 
 test('exit makes the owner rub his hands and adds dollars to the money box', async () => {
   const page = newFactory();
-  const current = await openFactory(page, fullPayload());
+  const current = await openReplay(page, fullPayload(), 't2');
   const timeline = playUntil(page, 't2/exit');
   const { hands, cheer, rage, dollars, moneyBox } = current.scene.office;
 
@@ -663,7 +692,7 @@ test('exit makes the owner rub his hands and adds dollars to the money box', asy
 
 test('refuse makes the owner rage and removes dollars', async () => {
   const page = newFactory();
-  const current = await openFactory(page, fullPayload());
+  const current = await openReplay(page, fullPayload(), 't1');
   const timeline = playUntil(page, 't1/refuse/g1');
   const { owner, hands, cheer, rage, dollars, moneyBox } = current.scene.office;
   const home = owner.x;
@@ -684,43 +713,38 @@ test('refuse makes the owner rage and removes dollars', async () => {
 
 test('every step timeline marks its event as played at one second', async () => {
   const page = newFactory();
-  const current = await openFactory(page, fullPayload());
+  const current = await openReplay(page, fullPayload(), 't2');
 
-  assert.equal(statusText(page), '0 of 14 events played');
+  assert.equal(statusText(page), 'Replay · Title of t2 · event 0 of 6');
   current.master.children().forEach(timeline => assert.equal(timeline.recorded('call').at(-1).position, 1));
   current.master.finish();
-  assert.equal(current.playedCount, 14);
-  assert.equal(current.playedIds.size, 14);
+  assert.equal(current.playedCount, 6);
+  assert.equal(current.playedIds.size, 6);
 });
 
 // ---- data, refresh and the fixed failure texts ----
 
-test('refresh shows played events without animation and animates only the others', async () => {
+test('refresh in the current state animates only the events recorded since the previous load', async () => {
   const page = newFactory();
   const payload = fullPayload();
   const first = { ...payload, events: payload.events.slice(0, 5) };
   await openFactory(page, first);
-  view(page).master.finish();
   const oldMaster = view(page).master;
-  assert.equal(page.requestTo('/api/factory').at(-1).url, '/api/factory?mode=live');
-
-  page.element('demo').checked = true;
   await refreshWith(page, payload);
 
   const current = view(page);
-  assert.equal(page.requestTo('/api/factory').at(-1).url, '/api/factory?mode=demo');
   assert.equal(oldMaster.killed, true);
-  assert.equal(current.master.children().length, 9, 'only the events not yet played are queued');
-  assert.equal(statusText(page), '5 of 14 events played');
+  assert.equal(current.master.children().length, 9, 'only the events recorded since the previous load are queued');
+  assert.equal(statusText(page), 'Current state · 4 tasks on the floor');
   const shown = Object.fromEntries(Object.entries(current.scene.boxes).map(([id, display]) => [id, display.visible]));
   assert.deepEqual(shown, { t1: true, t2: true, t3: true, t4: true });
   assert.deepEqual(pointOf(current.scene.boxes.t1), slotPoint(page, 0, 1, 0));
   assert.deepEqual(pointOf(current.scene.boxes.t3), slotPoint(page, 1, 0, 0));
-  assert.ok(current.scene.boxes.t1.children.length > 0 && Object.keys(current.scene.work).sort().join() === 't1,t2,t3,t4');
+  assert.equal(Object.keys(current.scene.work).sort().join(), 't1,t2', 'only the boxes on the lane that reports working are worked on');
   const animatedTargets = new Set(current.master.children().flatMap(timeline => timeline.recorded('to').map(entry => entry.target)));
   assert.equal(animatedTargets.has(current.scene.productOwner), false, 'no played enter event is brought in again');
   current.master.finish();
-  assert.equal(statusText(page), '14 of 14 events played');
+  assert.equal(statusText(page), 'Current state · 3 tasks on the floor');
 });
 
 test('refresh removes a lane that left the payload together with its boxes', async () => {
@@ -763,6 +787,7 @@ test('refresh adds a lane that is new in the payload', async () => {
   const current = view(page);
   assert.equal(current.scene.lanes.length, 2);
   assert.deepEqual(Object.keys(current.scene.boxes), ['t1', 't2', 't3', 't4']);
+  assert.equal(current.master.children().length, 5, 'only the events of the new lane are queued');
   assert.equal(current.layout.lanes.length, 2);
   assert.ok(page.pixi.texts.some(text => text.text === 's2 · beta' && !text.destroyed));
 });
@@ -800,7 +825,36 @@ test('a failed refresh keeps the fixed text and a later good answer clears it', 
   assert.equal(page.element('factory-pause').textContent, 'Pause');
 
   await refreshWith(page, fullPayload());
-  assert.equal(statusText(page), '0 of 14 events played');
+  assert.equal(statusText(page), 'Current state · 3 tasks on the floor');
+});
+
+test('a load that succeeds after a failed first load shows the current state and queues no step', async () => {
+  const page = newFactory();
+  await openUntilData(page);
+  page.requestTo('/api/factory').at(-1).reject(new Error(RAW_MESSAGE));
+  await flush();
+  assert.equal(statusText(page), DATA_FAILED);
+
+  await refreshWith(page, fullPayload());
+
+  const current = view(page);
+  assert.equal(statusText(page), 'Current state · 3 tasks on the floor');
+  assert.equal(current.master.children().length, 0);
+  assert.equal(current.playedIds.size, 14);
+  assert.deepEqual(pointOf(current.scene.boxes.t1), slotPoint(page, 0, 1, 0));
+});
+
+test('a failed refresh during a replay shows the fixed text and keeps the replay', async () => {
+  const page = newFactory();
+  await openReplay(page, fullPayload(), 't1');
+
+  page.eval('factoryRefresh()');
+  page.requestTo('/api/factory').at(-1).reject(new Error(RAW_MESSAGE));
+  await flush();
+
+  assert.equal(statusText(page), DATA_FAILED);
+  assert.equal(view(page).replayId, 't1');
+  assert.deepEqual(RAW_FRAGMENTS.filter(fragment => page.elementTexts().join('\n').includes(fragment)), []);
 });
 
 test('an older answer that arrives after a newer one is ignored', async () => {
@@ -815,7 +869,7 @@ test('an older answer that arrives after a newer one is ignored', async () => {
   older.reject(new Error(RAW_MESSAGE));
   await flush();
 
-  assert.equal(statusText(page), '0 of 3 events played');
+  assert.equal(statusText(page), 'Current state · 1 task on the floor');
   assert.deepEqual(view(page).plan.boxes.map(item => item.taskId), ['t1']);
 });
 
@@ -901,7 +955,7 @@ test('a tab hidden before the libraries finished loading has its ticker stopped 
 
 test('Pause and Play do not call the ticker', async () => {
   const page = newFactory();
-  await openFactory(page, fullPayload());
+  await openReplay(page, fullPayload(), 't1');
   const { ticker } = page.pixi.applications[0];
   const before = [...ticker.calls];
 
@@ -919,7 +973,541 @@ test('the hooks do nothing before the factory was opened', () => {
   page.eval('factorySetShown(false)');
   page.eval('factoryResize()');
   page.eval('factoryRedraw()');
+  page.eval('factoryChooseReplay()');
+  setScope(page, scopeOf('t1'));
 
   assert.equal(page.requests.length, 0);
   assert.equal(page.scripts.length, 0);
+  assert.equal(page.pixi.applications.length, 0);
+  assert.deepEqual(page.markupWrites, []);
+});
+
+// ---- current state, replay, scope and work animation ----
+
+const optionsOf = page => page.element('factory-replay').children.map(option => [option.value, option.textContent]);
+const workOf = page => Object.keys(view(page).scene.work).sort();
+const pauseButton = page => page.element('factory-pause');
+const sceneBoxIds = page => Object.keys(view(page).scene.boxes);
+const without = (payload, taskId) => ({
+  ...payload,
+  boxes: payload.boxes.filter(item => item.task_id !== taskId),
+  events: payload.events.filter(item => item.task_id !== taskId)
+});
+
+function scopeFrom(page, selection) {
+  page.context.selection = selection;
+  return JSON.parse(page.eval('JSON.stringify({ limited: factoryScopeFrom(selection).limited, key: factoryScopeFrom(selection).key, taskIds: [...factoryScopeFrom(selection).taskIds] })'));
+}
+
+function boxVisible(page, selection, taskId, replayId = '') {
+  page.context.selection = selection;
+  page.context.candidate = { taskId };
+  page.context.replayId = replayId;
+  return page.eval('factoryBoxVisible(candidate, factoryScopeFrom(selection), replayId)');
+}
+
+test('the first load shows every box at its current station and queues no step', async () => {
+  const page = newFactory();
+
+  const current = await openFactory(page, fullPayload());
+
+  assert.equal(current.master.children().length, 0);
+  assert.equal(current.playedIds.size, 14);
+  assert.equal(current.replayId, '');
+  assert.deepEqual(pointOf(current.scene.boxes.t1), slotPoint(page, 0, 1, 0));
+  assert.deepEqual(pointOf(current.scene.boxes.t3), slotPoint(page, 1, 0, 0));
+  assert.deepEqual(pointOf(current.scene.boxes.t4), slotPoint(page, 1, 1, 0));
+  assert.deepEqual(current.scene.lanes.length, 2);
+  assert.equal(statusText(page), 'Current state · 3 tasks on the floor');
+});
+
+test('a task that has left is not on the floor in the current state', async () => {
+  const page = newFactory();
+
+  const current = await openFactory(page, fullPayload());
+
+  assert.equal(current.scene.boxes.t2.visible, false);
+  assert.deepEqual(['t1', 't3', 't4'].map(id => current.scene.boxes[id].visible), [true, true, true]);
+  assert.equal(current.state.find(item => item.taskId === 't2').gone, true);
+  assert.equal(current.scene.work.t2, undefined);
+});
+
+test('a switch of the mode shows the current state of the new mode and queues no step', async () => {
+  const page = newFactory();
+  const payload = fullPayload();
+  await openFactory(page, { ...payload, events: payload.events.slice(0, 5) });
+
+  page.element('demo').checked = true;
+  await refreshWith(page, { ...payload, mode: 'demo' });
+
+  assert.equal(page.requestTo('/api/factory').at(-1).url, '/api/factory?mode=demo');
+  const current = view(page);
+  assert.equal(current.master.children().length, 0);
+  assert.equal(current.playedIds.size, 14);
+  assert.equal(statusText(page), 'Current state · 3 tasks on the floor');
+  assert.deepEqual(pointOf(current.scene.boxes.t4), slotPoint(page, 1, 1, 0));
+});
+
+test('a resize or theme change in the current state restarts nothing', async () => {
+  const page = newFactory();
+  const payload = fullPayload();
+  await openFactory(page, { ...payload, events: payload.events.slice(0, 5) });
+  await refreshWith(page, payload);
+  view(page).master.children().slice(0, 2).forEach(timeline => timeline.finish());
+  const before = view(page).scene;
+
+  page.document.documentElement.dataset.theme = 'light';
+  page.element('theme-toggle').fire('click');
+
+  assert.notEqual(view(page).scene, before);
+  assert.equal(view(page).master.children().length, 7, 'the events already played are not queued again');
+  assert.equal(view(page).playedIds.size, 7);
+  assert.equal(view(page).replayId, '');
+
+  Object.assign(page.element('factory-stage'), { clientWidth: 500, clientHeight: 650 });
+  page.fireWindow('resize');
+
+  assert.equal(view(page).master.children().length, 7);
+  assert.equal(view(page).playedIds.size, 7);
+  assert.equal(statusText(page), 'Current state · 4 tasks on the floor');
+});
+
+test('the replay list offers every task with a box by title and short id, newest activity first', async () => {
+  const page = newFactory();
+  const [first, second, third] = ['1234abcd-0001-aaaa', '9876fedc-0002-bbbb', '5555eeee-0003-cccc'];
+  const payload = payloadOf([lane('s1', 'alpha', 'Ada', null)], [box(first, 's1', 'a', 'First job'), box(second, 's1', 'a', 'Second job'), box(third, 's1', 'a', 'Third job')], [
+    [third + '/e', third, 'enter', 'investigating'],
+    [first + '/e', first, 'enter', 'investigating'],
+    [second + '/e', second, 'enter', 'investigating'],
+    [first + '/m', first, 'move', 'implementation'],
+    [second + '/x', second, 'exit', 'investigating']
+  ]);
+
+  await openFactory(page, payload);
+
+  assert.deepEqual(optionsOf(page), [
+    ['', 'Current state'],
+    [second, 'Second job · 9876fedc'],
+    [first, 'First job · 1234abcd'],
+    [third, 'Third job · 5555eeee']
+  ]);
+  assert.equal(page.element('factory-replay').value, '');
+});
+
+test('the replay list writes a title with markup characters as text', async () => {
+  const page = newFactory();
+  const payload = payloadOf([lane('s1', 'alpha', 'Ada', null)], [box('abcdef12-0001', 's1', 'a', MARKUP_TITLE)], [
+    ['t/e', 'abcdef12-0001', 'enter', 'investigating']
+  ]);
+
+  await openFactory(page, payload);
+
+  const [, option] = page.element('factory-replay').children;
+  assert.equal(option.textContent, MARKUP_TITLE + ' · abcdef12');
+  assert.equal(option.value, 'abcdef12-0001');
+  assert.deepEqual(page.markupWrites, []);
+});
+
+test('choosing a task replays only that task\'s events from its first one', async () => {
+  const page = newFactory();
+
+  const current = await openReplay(page, fullPayload(), 't1');
+
+  assert.equal(current.replayId, 't1');
+  assert.deepEqual(current.plan.steps.map(step => step.id), ['t1/stage/investigating', 't1/stage/implementation', 't1/refuse/g1']);
+  assert.equal(current.playedIds.size, 0);
+  assert.equal(current.master.children().length, 3);
+  assert.equal(current.scene.boxes.t1.visible, false, 'the box has not entered yet');
+  assert.equal(toEntries(current.master.children()[0], current.scene.productOwner).length > 0, true, 'the first event is the enter');
+  current.master.finish();
+  assert.deepEqual(pointOf(current.scene.boxes.t1), slotPoint(page, 0, 1, 0));
+});
+
+test('a replay starts from the first event even when every event was already played', async () => {
+  const page = newFactory();
+  await openFactory(page, fullPayload());
+  assert.equal(view(page).playedIds.size, 14);
+
+  const current = await chooseReplay(page, 't2');
+
+  assert.equal(current.playedIds.size, 0);
+  assert.equal(current.master.children().length, 6);
+  assert.equal(current.state.find(item => item.taskId === 't2').station, null);
+});
+
+test('a replay shows only the chosen task\'s lane and box', async () => {
+  const page = newFactory();
+
+  const current = await openReplay(page, fullPayload(), 't3');
+
+  assert.deepEqual(current.plan.lanes.map(item => item.sessionId), ['s2']);
+  assert.deepEqual(sceneBoxIds(page), ['t3']);
+  assert.equal(current.scene.lanes.length, 1);
+  const labels = page.pixi.texts.filter(text => !text.destroyed).map(text => text.text);
+  assert.ok(labels.includes('s2 · beta'));
+  assert.ok(!labels.includes('Ada · alpha'));
+});
+
+test('choosing the current state again shows it without animation', async () => {
+  const page = newFactory();
+  const replay = await openReplay(page, fullPayload(), 't1');
+  replay.master.children()[0].finish();
+
+  const current = await chooseReplay(page, '');
+
+  assert.equal(current.replayId, '');
+  assert.equal(current.master.children().length, 0);
+  assert.equal(current.playedIds.size, 14);
+  assert.equal(current.scene.lanes.length, 2);
+  assert.equal(statusText(page), 'Current state · 3 tasks on the floor');
+  assert.equal(page.element('factory-replay').value, '');
+});
+
+test('refresh during a replay keeps the played events and animates the rest', async () => {
+  const page = newFactory();
+  const payload = fullPayload();
+  const shorter = { ...payload, events: payload.events.filter(item => item.id !== 't1/refuse/g1') };
+  const replay = await openReplay(page, shorter, 't1');
+  replay.master.finish();
+  assert.equal(statusText(page), 'Replay · Title of t1 · event 2 of 2');
+
+  await refreshWith(page, payload);
+
+  const current = view(page);
+  assert.equal(current.replayId, 't1');
+  assert.equal(current.playedIds.size, 2);
+  assert.equal(current.master.children().length, 1);
+  assert.equal(statusText(page), 'Replay · Title of t1 · event 2 of 3');
+  assert.deepEqual(pointOf(current.scene.boxes.t1), slotPoint(page, 0, 1, 0));
+  assert.equal(page.element('factory-replay').value, 't1');
+});
+
+test('a replayed task missing after a refresh returns to the current state', async () => {
+  const page = newFactory();
+  const replay = await openReplay(page, fullPayload(), 't1');
+  replay.master.children()[0].finish();
+
+  await refreshWith(page, without(fullPayload(), 't1'));
+
+  const current = view(page);
+  assert.equal(current.replayId, '');
+  assert.equal(current.master.children().length, 0);
+  assert.equal(statusText(page), 'Current state · 2 tasks on the floor');
+  assert.equal(page.element('factory-replay').value, '');
+  assert.ok(optionsOf(page).every(([value]) => value !== 't1'));
+  assert.equal(pauseButton(page).disabled, true);
+});
+
+test('a resize or theme change during a replay keeps the replay and its played events', async () => {
+  const page = newFactory();
+  const replay = await openReplay(page, fullPayload(), 't2');
+  replay.master.children().slice(0, 3).forEach(timeline => timeline.finish());
+  const before = view(page).scene;
+
+  page.document.documentElement.dataset.theme = 'light';
+  page.element('theme-toggle').fire('click');
+
+  assert.notEqual(view(page).scene, before);
+  assert.equal(view(page).replayId, 't2');
+  assert.equal(view(page).playedIds.size, 3);
+  assert.equal(view(page).master.children().length, 3);
+  assert.equal(statusText(page), 'Replay · Title of t2 · event 3 of 6');
+
+  Object.assign(page.element('factory-stage'), { clientWidth: 500, clientHeight: 650 });
+  page.fireWindow('resize');
+
+  assert.equal(view(page).replayId, 't2');
+  assert.equal(view(page).playedIds.size, 3);
+  assert.equal(view(page).master.children().length, 3);
+  assert.equal(page.element('factory-replay').value, 't2');
+});
+
+test('hiding and showing the tab during a replay pauses and resumes it', async () => {
+  const page = newFactory();
+  const current = await openReplay(page, fullPayload(), 't1');
+
+  page.eval('factorySetShown(false)');
+  assert.equal(current.master.paused, true);
+  page.eval('factorySetShown(true)');
+  assert.equal(current.master.paused, false);
+  assert.equal(current.replayId, 't1');
+});
+
+// ---- pause and speed ----
+
+test('pause is disabled in the current state and enabled in a replay', async () => {
+  const page = newFactory();
+  await openFactory(page, fullPayload());
+  assert.equal(pauseButton(page).disabled, true);
+  pauseButton(page).fire('click');
+  assert.deepEqual([view(page).userPaused, pauseButton(page).textContent, view(page).master.paused], [false, 'Pause', false]);
+
+  await chooseReplay(page, 't1');
+  assert.equal(pauseButton(page).disabled, false);
+
+  await chooseReplay(page, '');
+  assert.equal(pauseButton(page).disabled, true);
+});
+
+test('leaving a paused replay resumes the clock and disables pause', async () => {
+  const page = newFactory();
+  await openReplay(page, fullPayload(), 't1');
+  pauseButton(page).fire('click');
+  assert.deepEqual([view(page).userPaused, pauseButton(page).textContent, view(page).master.paused], [true, 'Play', true]);
+
+  const current = await chooseReplay(page, '');
+
+  assert.equal(current.userPaused, false);
+  assert.equal(pauseButton(page).textContent, 'Pause');
+  assert.equal(pauseButton(page).disabled, true);
+  assert.deepEqual([current.master, ...current.scene.ambient, ...Object.values(current.scene.work).map(work => work.tween)].map(tween => tween.paused), [false, false, false]);
+  assert.equal(statusText(page), 'Current state · 3 tasks on the floor');
+});
+
+test('speed stays enabled in both views', async () => {
+  const page = newFactory();
+  const speed = page.element('factory-speed');
+  await openFactory(page, fullPayload());
+  assert.equal(speed.disabled, false);
+  speed.value = '2';
+  speed.fire('change');
+  assert.equal(view(page).speed, 2);
+
+  const replay = await chooseReplay(page, 't1');
+  assert.equal(speed.disabled, false);
+  speed.value = '4';
+  speed.fire('change');
+  assert.equal(replay.speed, 4);
+  assert.equal(replay.master.timeScales.at(-1), 4);
+});
+
+// ---- scope ----
+
+test('a selection with no filter limits nothing', () => {
+  const page = newFactory();
+
+  for (const selection of [SELECTION, undefined, null, 'text', { ...SELECTION, scopedTasks: [{ id: 't1' }], hideCompleted: true }]) {
+    const scope = scopeFrom(page, selection);
+    assert.deepEqual([scope.limited, scope.key], [false, 'open'], JSON.stringify(selection));
+  }
+});
+
+test('a filtered selection keeps only its tasks', () => {
+  const page = newFactory();
+  const filters = { p: 'proj', e: 'EPIC-1', taskId: 't1', team: 'BE', q: 'find' };
+
+  for (const [name, value] of Object.entries(filters)) {
+    const scope = scopeFrom(page, { ...SELECTION, [name]: value, scopedTasks: [{ id: 'b' }, { id: 'a' }, { id: '' }, { id: 7 }, null] });
+    assert.deepEqual([scope.limited, scope.taskIds.sort()], [true, ['a', 'b']], name);
+  }
+  assert.equal(scopeFrom(page, { ...SELECTION, invalid: ['Project: x'] }).limited, true);
+  const first = scopeFrom(page, scopeOf('b', 'a'));
+  assert.equal(first.key, scopeFrom(page, scopeOf('a', 'b')).key, 'the key does not depend on the order');
+  assert.notEqual(first.key, scopeFrom(page, scopeOf('a')).key);
+});
+
+test('with a filter set, a box whose task is missing from the selection is hidden', () => {
+  const page = newFactory();
+
+  assert.equal(boxVisible(page, scopeOf('t1'), 't1'), true);
+  assert.equal(boxVisible(page, scopeOf('t1'), 't9'), false);
+  assert.equal(boxVisible(page, SELECTION, 't9'), true);
+  assert.equal(boxVisible(page, SELECTION, 't1', 't1'), true);
+  assert.equal(boxVisible(page, SELECTION, 't9', 't1'), false);
+});
+
+test('a limited scope hides the boxes out of scope and the lanes without a task in scope', async () => {
+  const page = newFactory();
+  await openFactory(page, fullPayload());
+
+  setScope(page, scopeOf('t3'));
+
+  const current = view(page);
+  assert.deepEqual(current.plan.boxes.map(item => item.taskId), ['t3']);
+  assert.deepEqual(current.plan.lanes.map(item => item.sessionId), ['s2']);
+  assert.deepEqual(sceneBoxIds(page), ['t3']);
+  assert.equal(current.scene.lanes.length, 1);
+  assert.equal(statusText(page), 'Current state · 1 task on the floor');
+});
+
+test('the replay list offers only the tasks in scope', async () => {
+  const page = newFactory();
+  await openFactory(page, fullPayload());
+
+  setScope(page, scopeOf('t1', 't4'));
+
+  assert.deepEqual(optionsOf(page).map(([value]) => value), ['', 't4', 't1']);
+  setScope(page, SELECTION);
+  assert.deepEqual(optionsOf(page).map(([value]) => value), ['', 't3', 't2', 't4', 't1']);
+});
+
+test('an invalid selection empties the floor and the replay list', async () => {
+  const page = newFactory();
+  await openFactory(page, fullPayload());
+
+  setScope(page, { ...SELECTION, invalid: ['Project: gone'], scopedTasks: [] });
+
+  const current = view(page);
+  assert.deepEqual([current.plan.boxes.length, current.plan.lanes.length, current.scene.lanes.length], [0, 0, 0]);
+  assert.deepEqual(optionsOf(page), [['', 'Current state']]);
+  assert.equal(statusText(page), 'Current state · 0 tasks on the floor');
+});
+
+test('a scope set before the factory opens limits the first floor and the replay list', async () => {
+  const page = newFactory();
+  setScope(page, scopeOf('t3'));
+  assert.equal(page.requests.length, 0);
+
+  await openFactory(page, fullPayload());
+
+  assert.deepEqual(sceneBoxIds(page), ['t3']);
+  assert.equal(view(page).scene.lanes.length, 1);
+  assert.deepEqual(optionsOf(page).map(([value]) => value), ['', 't3']);
+  assert.equal(statusText(page), 'Current state · 1 task on the floor');
+});
+
+test('a scope change shows the current state without animation', async () => {
+  const page = newFactory();
+  const payload = fullPayload();
+  await openFactory(page, { ...payload, events: payload.events.slice(0, 5) });
+  await refreshWith(page, payload);
+  assert.equal(view(page).master.children().length, 9);
+
+  setScope(page, scopeOf('t1', 't2', 't3', 't4'));
+
+  const current = view(page);
+  assert.equal(current.master.children().length, 0);
+  assert.equal(current.playedIds.size, 14);
+  assert.equal(statusText(page), 'Current state · 3 tasks on the floor');
+});
+
+test('an unchanged scope does not rebuild the scene', async () => {
+  const page = newFactory();
+  await openFactory(page, fullPayload());
+  const open = view(page).scene;
+
+  setScope(page, SELECTION);
+  assert.equal(view(page).scene, open);
+  setScope(page, scopeOf('t1', 't3'));
+  const limited = view(page).scene;
+  assert.notEqual(limited, open);
+  setScope(page, scopeOf('t3', 't1'));
+  assert.equal(view(page).scene, limited);
+});
+
+test('a scope change that excludes the replayed task returns to the current state', async () => {
+  const page = newFactory();
+  await openReplay(page, fullPayload(), 't1');
+
+  setScope(page, scopeOf('t3'));
+
+  const current = view(page);
+  assert.equal(current.replayId, '');
+  assert.equal(current.master.children().length, 0);
+  assert.equal(statusText(page), 'Current state · 1 task on the floor');
+  assert.equal(page.element('factory-replay').value, '');
+  assert.deepEqual(optionsOf(page).map(([value]) => value), ['', 't3']);
+  assert.equal(pauseButton(page).disabled, true);
+});
+
+test('a scope change during a replay that keeps its task lets the replay go on', async () => {
+  const page = newFactory();
+  const replay = await openReplay(page, fullPayload(), 't1');
+  replay.master.children()[0].finish();
+  const { scene, master } = replay;
+
+  setScope(page, scopeOf('t1', 't3'));
+
+  const current = view(page);
+  assert.deepEqual([current.scene === scene, current.master === master, master.killed], [true, true, false]);
+  assert.equal(current.replayId, 't1');
+  assert.equal(current.playedIds.size, 1);
+  assert.equal(page.element('factory-replay').value, 't1');
+  assert.deepEqual(optionsOf(page).map(([value]) => value), ['', 't3', 't1']);
+  assert.equal(statusText(page), 'Replay · Title of t1 · event 1 of 3');
+});
+
+test('a refresh in a limited scope animates only the events of the tasks in scope', async () => {
+  const page = newFactory();
+  const payload = fullPayload();
+  await openFactory(page, { ...payload, events: payload.events.slice(0, 5) });
+  setScope(page, scopeOf('t3'));
+
+  await refreshWith(page, payload);
+
+  const current = view(page);
+  assert.equal(current.master.children().length, 1, 'only the refusal of t3 is recorded for a task in scope');
+  assert.equal(current.playedIds.has('t4/refuse/report'), true, 'the events of the tasks out of scope count as played');
+  assert.equal(current.playedIds.has('t3/refuse/report'), false);
+  assert.equal(toEntries(current.master.children()[0], current.scene.office.owner).length > 0, true, 'the owner rages at the refusal');
+});
+
+// ---- work animation follows the worker's recorded status ----
+
+const NOT_WORKING = [['waiting', { status: 'waiting', at: '2026-11-28T09:00:00Z' }], ['idle', { status: 'idle', at: '2026-11-28T09:00:00Z' }], ['blocked', { status: 'blocked', at: '2026-11-28T09:00:00Z' }], ['nothing', null]];
+
+function oneBoxPayload(lastStatus, specs) {
+  return payloadOf([lane('s1', 'alpha', 'Ada', lastStatus)], [box('t1', 's1', 'implementation')], specs);
+}
+
+const PATH = [
+  ['t1/stage/investigating', 't1', 'enter', 'investigating'],
+  ['t1/stage/implementation', 't1', 'move', 'implementation'],
+  ['t1/refuse/x', 't1', 'refuse', 'implementation', 'g1']
+];
+
+test('a box on a lane that reports working shows the work animation', async () => {
+  const page = newFactory();
+
+  const current = await openFactory(page, oneBoxPayload(WORKING, PATH.slice(0, 2)));
+
+  const post = current.scene.lanes[0].robots[1];
+  assert.deepEqual(workOf(page), ['t1']);
+  assert.equal(current.scene.work.t1.glyph.text, '</>');
+  assert.deepEqual(pointOf(current.scene.work.t1.glyph), pointOf(post));
+});
+
+test('a box on a lane that reports waiting, idle, blocked or nothing stands without the work animation', async t => {
+  for (const [name, lastStatus] of NOT_WORKING) {
+    await t.test(name, async () => {
+      const page = newFactory();
+      const current = await openFactory(page, oneBoxPayload(lastStatus, PATH.slice(0, 2)));
+      current.master.finish();
+
+      assert.deepEqual(pointOf(current.scene.boxes.t1), slotPoint(page, 0, 1, 0));
+      assert.deepEqual(workOf(page), []);
+    });
+  }
+});
+
+test('a refresh in the current state that plays an enter, move or refuse step on a lane that does not report working starts no work animation', async t => {
+  for (const [name, lastStatus] of [['working', WORKING], ...NOT_WORKING]) {
+    await t.test(name, async () => {
+      const page = newFactory();
+      await openFactory(page, oneBoxPayload(lastStatus, []));
+      await refreshWith(page, oneBoxPayload(lastStatus, PATH));
+      const steps = view(page).master.children();
+      assert.equal(steps.length, 3);
+      const expected = lastStatus && lastStatus.status === 'working' ? ['t1'] : [];
+
+      for (const step of steps) {
+        step.finish();
+        assert.deepEqual(workOf(page), expected);
+      }
+    });
+  }
+});
+
+test('a replay shows the work animation whatever the lane reports', async t => {
+  for (const [name, lastStatus] of NOT_WORKING) {
+    await t.test(name, async () => {
+      const page = newFactory();
+      const replay = await openReplay(page, oneBoxPayload(lastStatus, PATH), 't1');
+
+      for (const step of replay.master.children()) {
+        step.finish();
+        assert.deepEqual(workOf(page), ['t1']);
+      }
+    });
+  }
 });

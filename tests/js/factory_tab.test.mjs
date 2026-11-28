@@ -49,7 +49,7 @@ async function loadDashboard(page, settle) {
   await flush();
 }
 
-async function openFactoryFromTab({ page, show }) {
+async function openFactoryFromTab({ page, show }, factoryPayload = { lanes: [], boxes: [], events: [] }) {
   Object.assign(page.element('factory-stage'), { clientWidth: 900, clientHeight: 650 });
   show('#factory');
   for (let index = 0; index < LIBRARY_COUNT; index += 1) {
@@ -57,7 +57,7 @@ async function openFactoryFromTab({ page, show }) {
     page.scripts[index].onload();
   }
   await flush();
-  page.requestTo('/api/factory')[0].resolve(okResponse({ lanes: [], boxes: [], events: [] }));
+  page.requestTo('/api/factory')[0].resolve(okResponse(factoryPayload));
   await flush();
   return page.eval('factoryView');
 }
@@ -138,4 +138,69 @@ test('app.js alone still selects views and loads without error', async () => {
   assert.equal(page.element('error').hidden, true);
   assert.equal(page.eval('data.mode'), 'live');
   assert.equal(page.requestTo('/api/factory').length, 0);
+  page.element('project').fire('change');
+  assert.equal(page.element('error').hidden, true, 'a filter change renders without the factory');
+});
+
+const FACTORY_TASKS = [
+  { id: 'ta', project: 'proj-a', teams: ['BE'] },
+  { id: 'tb', project: 'proj-b', teams: ['FE'] },
+  { id: 'tc', project: 'proj-a', teams: ['FE'] }
+];
+
+function filterableDashboard() {
+  const tasks = FACTORY_TASKS.map(item => ({
+    ...item, title: 'Title of ' + item.id, status: 'in_progress', mapping_kind: 'unmapped', epic_keys: [], issue_keys: [], unresolved_issue_keys: [], blockers: [],
+    updated_at: '2020-01-01T00:00:00Z', evidenced: false
+  }));
+  return { ...dashboardPayload(), tasks, projects: [{ id: 'proj-a', name: 'A' }, { id: 'proj-b', name: 'B' }] };
+}
+
+function factoryOfTasks() {
+  const at = index => '2026-11-28T10:0' + index + ':00Z';
+  return {
+    mode: 'live',
+    lanes: [{ session_id: 's1', project: 'proj-a', session_name: 'Ada', last_status: null }],
+    boxes: FACTORY_TASKS.map(item => ({ task_id: item.id, title: 'Title of ' + item.id, project: item.project, session_id: 's1', stage: 'investigating' })),
+    events: FACTORY_TASKS.map((item, index) => ({ id: item.id + '/e', at: at(index), task_id: item.id, kind: 'enter', stage: 'investigating', gate: null }))
+  };
+}
+
+async function openFilteredFactory(change) {
+  const dashboard = newDashboard({ withFactory: true });
+  const { page } = dashboard;
+  await openFactoryFromTab(dashboard, factoryOfTasks());
+  await loadDashboard(page, request => request.resolve(okResponse(filterableDashboard())));
+  assert.deepEqual(page.eval('factoryView').plan.boxes.map(item => item.taskId), ['ta', 'tb', 'tc'], 'nothing is selected yet');
+  change(page);
+  return page.eval('factoryView');
+}
+
+test('changing the team, project or task filter limits the factory', async t => {
+  const changes = {
+    'the team filter': [page => { page.element('team').value = 'BE'; page.element('team').fire('change'); }, ['ta']],
+    'the project filter': [page => { page.element('project').value = 'proj-a'; page.element('project').fire('change'); }, ['ta', 'tc']],
+    'the task filter': [page => { page.element('epic').value = 'task:tb'; page.element('epic').fire('change'); }, ['tb']],
+    'Find work': [page => { page.element('search').value = 'Title of TC'; page.element('search').fire('input'); }, ['tc']]
+  };
+  for (const [name, [change, expected]] of Object.entries(changes)) {
+    await t.test(name, async () => {
+      const current = await openFilteredFactory(change);
+
+      assert.deepEqual(current.plan.boxes.map(item => item.taskId), expected);
+      assert.deepEqual(Object.keys(current.scene.boxes), expected);
+    });
+  }
+});
+
+test('hide completed does not limit the factory', async () => {
+  const current = await openFilteredFactory(page => {
+    page.eval('data.tasks[0].evidenced = true');
+    page.element('hide-completed').checked = true;
+    page.element('hide-completed').fire('change');
+    assert.deepEqual(page.eval('selection().tasks.map(task => task.id)').join(), 'tb,tc', 'the other views hide the settled task');
+  });
+
+  assert.deepEqual(current.plan.boxes.map(item => item.taskId), ['ta', 'tb', 'tc']);
+  assert.deepEqual(Object.keys(current.scene.boxes), ['ta', 'tb', 'tc']);
 });
