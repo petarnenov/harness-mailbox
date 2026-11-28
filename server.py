@@ -14,6 +14,8 @@ from dependency_graph import build_graph
 from delivery_process import STAGES, project_delivery
 
 ROOT = Path(__file__).parent
+VENDORED_SCRIPTS = {f'/vendor/{name}': (f'vendor/{name}', 'text/javascript; charset=utf-8')
+                    for name in ('pixi-8.23.0.min.js', 'pixi-unsafe-eval-8.23.0.min.js', 'gsap-3.15.1.min.js')}
 CLOSED_TASK_STATUSES = ('done', 'cancelled')
 STATUSES = ('pending', 'in_progress', 'blocked', 'awaiting_verification', 'verified_done', 'deferred')
 
@@ -604,6 +606,12 @@ def context_for(root, node_id):
     return build_context_pack(build_dashboard(root), root, read_json, node_id)
 
 
+def factory_for(root, mode):
+    """The factory animation projection of the mailbox at root."""
+    from factory_floor import build_factory  # lazy: dispatch_gate imports server and must not load it
+    return build_factory(build_dashboard(root, mode=mode), root, read_json, mode)
+
+
 def mode_root(mode):
     return ROOT / 'demo' if mode == 'demo' else Path(os.environ.get('MAILBOX_ROOT', '/data'))
 
@@ -648,6 +656,10 @@ class Handler(BaseHTTPRequestHandler):
         pack = context_for(mode_root(mode), node_id)
         return None if pack is None else json.dumps({**pack, 'mode': mode}, allow_nan=False).encode()
 
+    def factory_payload(self, query):
+        mode = parse_mode(query)
+        return json.dumps(factory_for(mode_root(mode), mode), allow_nan=False).encode()
+
     def reply_dashboard(self, query):
         try:
             payload = self.dashboard_payload(query)
@@ -670,6 +682,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(404, {'error': {'code': 'not_found', 'message': 'Context node not found'}})
         return self.reply(200, payload)
 
+    def reply_factory(self, query):
+        try:
+            payload = self.factory_payload(query)
+        except InvalidRequest as invalid:
+            return self.reply(400, {'error': {'code': 'invalid_request', 'message': str(invalid)}})
+        except Exception as failure:
+            self.log_error('Factory projection failed: %r', failure)
+            return self.reply(500, {'error': {'code': 'internal_error', 'message': 'Factory data could not be read'}})
+        return self.reply(200, payload)
+
     def do_GET(self):
         parsed = urlsplit(self.path)
         if parsed.path == '/healthz':
@@ -678,7 +700,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply_dashboard(parse_qs(parsed.query))
         if parsed.path == '/api/context':
             return self.reply_context(parse_qs(parsed.query))
-        files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/theme.js': ('theme.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}
+        if parsed.path == '/api/factory':
+            return self.reply_factory(parse_qs(parsed.query))
+        files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/theme.js': ('theme.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/factory.js': ('factory.js', 'text/javascript; charset=utf-8'), **VENDORED_SCRIPTS}
         if parsed.path in files:
             filename, mime = files[parsed.path]
             return self.reply(200, (ROOT / 'static' / filename).read_bytes(), mime)

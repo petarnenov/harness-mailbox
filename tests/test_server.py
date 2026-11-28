@@ -990,5 +990,178 @@ class ContextCompositionTests(Fixture):
         self.assertEqual(without, with_records)
 
 
+from datetime import datetime  # noqa: E402  imported here so the lines of the existing tests keep their numbers
+
+try:
+    from factory_fixture import write_mailbox  # noqa: E402
+except ModuleNotFoundError:  # run as tests.test_server from the repository root
+    from tests.factory_fixture import write_mailbox  # noqa: E402
+
+
+class FactoryApiTests(Fixture):
+    FACTORY_KEYS = {'generated_at', 'mode', 'warnings', 'stations', 'lanes', 'boxes', 'events'}
+    LANE_KEYS = {'session_id', 'project', 'session_name', 'registered_status', 'last_seen_at', 'last_status'}
+    BOX_KEYS = {'task_id', 'title', 'project', 'session_id', 'stage'}
+    EVENT_KEYS = {'id', 'at', 'task_id', 'kind', 'stage', 'gate'}
+    VENDORED_FILES = ('pixi-8.23.0.min.js', 'pixi-unsafe-eval-8.23.0.min.js', 'gsap-3.15.1.min.js')
+    RAW_FAILURE = ('Traceback (most recent call last):\n  File "/app/factory_floor.py", line 88, in build_factory\n'
+                   "PermissionError: [Errno 13] Permission denied: '/data/deliveries/T-STATION-1.json'")
+    RAW_FRAGMENTS = ('Traceback', '/app/factory_floor.py', '/data/deliveries', 'Permission denied', 'PermissionError', 'Errno')
+    FIXED_FAILURE = {'error': {'code': 'internal_error', 'message': 'Factory data could not be read'}}
+
+    def setUp(self):
+        super().setUp()
+        quiet_log = patch.object(server.Handler, 'log_message')
+        quiet_log.start()
+        self.addCleanup(quiet_log.stop)
+        self.httpd = server.ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.conn = HTTPConnection('127.0.0.1', self.httpd.server_port)
+        environment = patch.dict(os.environ, {'MAILBOX_ROOT': str(self.root)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        write_mailbox(self.root)
+
+    def tearDown(self):
+        self.conn.close()
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=2)
+        super().tearDown()
+
+    def get(self, path):
+        self.conn.request('GET', path)
+        response = self.conn.getresponse()
+        return response.status, response.read(), dict(response.getheaders())
+
+    def tree_state(self):
+        return {str(path.relative_to(self.root)): (path.stat().st_mtime_ns, path.read_bytes() if path.is_file() else None)
+                for path in sorted(self.root.rglob('*'))}
+
+    def assert_security_headers(self, headers, content_type):
+        self.assertEqual(content_type, headers['Content-Type'])
+        self.assertEqual('no-store', headers['Cache-Control'])
+        self.assertEqual('nosniff', headers['X-Content-Type-Options'])
+        self.assertEqual(CSP, headers['Content-Security-Policy'])
+
+    def test_the_route_answers_the_frozen_shape_with_the_security_headers(self):
+        status, body, headers = self.get('/api/factory')
+        payload = json.loads(body)
+        self.assertEqual(200, status)
+        self.assert_security_headers(headers, 'application/json; charset=utf-8')
+        self.assertEqual(self.FACTORY_KEYS, set(payload))
+        self.assertEqual('live', payload['mode'])
+        self.assertIsNotNone(datetime.fromisoformat(payload['generated_at']).utcoffset())
+        self.assertEqual(['investigating', 'implementation', 'review', 'verification'], payload['stations'])
+        self.assertEqual([], payload['warnings'])
+        self.assertEqual(['sess-alpha', 'sess-beta'], [lane['session_id'] for lane in payload['lanes']])
+        for name, keys in (('lanes', self.LANE_KEYS), ('boxes', self.BOX_KEYS), ('events', self.EVENT_KEYS)):
+            self.assertTrue(payload[name])
+            for item in payload[name]:
+                self.assertEqual(keys, set(item))
+
+    def test_demo_mode_reads_the_demo_directory_and_answers_mode_demo(self):
+        checkout = Path(self.temp.name) / 'checkout'
+        (checkout / 'demo' / 'sessions').mkdir(parents=True)
+        (checkout / 'demo' / 'sessions' / 'w.json').write_text(json.dumps({'session_id': 'demo-session', 'project': 'demo-project', 'role': 'worker'}))
+        with patch.object(server, 'ROOT', checkout):
+            demo_status, demo_body, _ = self.get('/api/factory?mode=demo')
+            live_status, live_body, _ = self.get('/api/factory?mode=live')
+        demo, live = json.loads(demo_body), json.loads(live_body)
+        self.assertEqual((200, 'demo', ['demo-session'], [], []), (demo_status, demo['mode'], [lane['session_id'] for lane in demo['lanes']],
+                                                                 demo['boxes'], demo['events']))
+        self.assertEqual((200, 'live', ['sess-alpha', 'sess-beta']), (live_status, live['mode'], [lane['session_id'] for lane in live['lanes']]))
+
+    def test_an_invalid_mode_is_rejected_with_the_message_of_the_dashboard_route(self):
+        status, body, headers = self.get('/api/factory?mode=wat')
+        _, dashboard_body, _ = self.get('/api/dashboard?mode=wat')
+        self.assertEqual(400, status)
+        self.assertEqual({'error': {'code': 'invalid_request', 'message': 'Unknown mode'}}, json.loads(body))
+        self.assertEqual(json.loads(dashboard_body), json.loads(body))
+        self.assert_security_headers(headers, 'application/json; charset=utf-8')
+
+    def test_factory_route_rejects_mutating_methods(self):
+        for method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+            with self.subTest(method=method):
+                self.conn.request(method, '/api/factory', body=b'{"x": 1}')
+                response = self.conn.getresponse()
+                body = json.loads(response.read())
+                self.assertEqual((405, {'error': {'code': 'read_only', 'message': 'This dashboard is read-only'}}), (response.status, body))
+                self.assert_security_headers(dict(response.getheaders()), 'application/json; charset=utf-8')
+
+    def test_factory_route_leaves_the_mailbox_tree_unchanged(self):
+        before = self.tree_state()
+        self.assertEqual(200, self.get('/api/factory')[0])
+        self.assertEqual(400, self.get('/api/factory?mode=wat')[0])
+        self.conn.request('POST', '/api/factory', body=b'{}')
+        self.conn.getresponse().read()
+        self.assertEqual(before, self.tree_state())
+
+    def test_factory_failure_answers_the_fixed_message_without_the_exception_text(self):
+        failures = {'the projection raises': patch.object(server, 'factory_for', side_effect=RuntimeError(self.RAW_FAILURE)),
+                    'a guarded read raises': patch.object(server, 'read_json', side_effect=OSError(self.RAW_FAILURE))}
+        for name, failure in failures.items():
+            with self.subTest(name), failure:
+                status, body, headers = self.get('/api/factory')
+                self.assertEqual((500, self.FIXED_FAILURE), (status, json.loads(body)))
+                self.assert_security_headers(headers, 'application/json; charset=utf-8')
+                for raw in self.RAW_FRAGMENTS:
+                    self.assertNotIn(raw, body.decode() + str(headers))
+
+    def test_a_projection_that_cannot_be_serialised_without_non_finite_numbers_answers_the_fixed_message(self):
+        with patch.object(server, 'factory_for', return_value={'bad': float('nan')}):
+            status, body, _ = self.get('/api/factory')
+        self.assertEqual((500, self.FIXED_FAILURE), (status, json.loads(body)))
+
+    def test_vendored_scripts_are_served_as_javascript_with_the_security_headers(self):
+        self.assertEqual({f'/vendor/{name}' for name in self.VENDORED_FILES}, set(server.VENDORED_SCRIPTS))
+        for name in self.VENDORED_FILES:
+            with self.subTest(name):
+                status, body, headers = self.get(f'/vendor/{name}')
+                self.assertEqual(200, status)
+                self.assert_security_headers(headers, 'text/javascript; charset=utf-8')
+                self.assertEqual((server.ROOT / 'static' / 'vendor' / name).read_bytes(), body)
+                self.assertTrue(body)
+
+    def test_the_vendor_record_the_licence_text_and_other_vendor_paths_are_not_served(self):
+        for path in ('/vendor/VENDOR.md', '/vendor/LICENSE-pixi.txt', '/vendor/', '/vendor/pixi-9.0.0.min.js',
+                     '/static/vendor/gsap-3.15.1.min.js', '/vendor/../server.py'):
+            with self.subTest(path):
+                status, body, headers = self.get(path)
+                self.assertEqual((404, {'error': {'code': 'not_found', 'message': 'Not found'}}), (status, json.loads(body)))
+                self.assert_security_headers(headers, 'application/json; charset=utf-8')
+
+    def test_the_factory_script_is_served_as_javascript_with_the_security_headers(self):
+        checkout = Path(self.temp.name) / 'checkout'
+        (checkout / 'static').mkdir(parents=True)
+        (checkout / 'static' / 'factory.js').write_text('// factory')
+        with patch.object(server, 'ROOT', checkout):
+            status, body, headers = self.get('/factory.js')
+        self.assertEqual((200, b'// factory'), (status, body))
+        self.assert_security_headers(headers, 'text/javascript; charset=utf-8')
+
+    def test_index_lists_six_tabs_and_the_factory_panel(self):
+        status, body, headers = self.get('/')
+        page = body.decode('utf-8')
+        self.assertEqual(200, status)
+        self.assert_security_headers(headers, 'text/html; charset=utf-8')
+        tab_ids = [chunk.split('"')[0] for chunk in page.split('<a id="tab-')[1:]]
+        self.assertEqual(['overview', 'dependencies', 'tasks', 'estimates', 'sources', 'factory'], tab_ids)
+        self.assertIn('<section id="view-factory" class="page-view" role="tabpanel" aria-labelledby="tab-factory"', page)
+        for element_id in ('factory-pause', 'factory-speed', 'factory-status', 'factory-stage', 'factory-tooltip'):
+            with self.subTest(element_id):
+                self.assertEqual(1, page.count('id="' + element_id + '"'))
+        self.assertLess(page.index('<script src="/factory.js"></script>'), page.index('<script src="/app.js"></script>'))
+
+
+class FactoryCompositionTests(unittest.TestCase):
+    def test_importing_server_does_not_import_the_factory_floor(self):
+        checkout = Path(server.__file__).resolve().parent
+        probe = 'import sys, server, dispatch_gate; sys.exit(1 if "factory_floor" in sys.modules else 0)'
+        result = subprocess.run([sys.executable, '-B', '-c', probe], cwd=checkout, capture_output=True, text=True)
+        self.assertEqual((0, ''), (result.returncode, result.stderr))
+
+
 if __name__ == '__main__':
     unittest.main()
