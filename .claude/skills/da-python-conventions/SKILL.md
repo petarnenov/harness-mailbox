@@ -5,7 +5,7 @@ user-invocable: false
 globs: []
 ---
 
-RULEBOOK: da-python@2026-11-28.2
+RULEBOOK: da-python@2026-11-28.3
 
 # Python production rules
 
@@ -16,6 +16,7 @@ Apply these rules to production code in this repository: root modules `server.py
 - **§K1.2 (P1)** The server makes no Jira, AIO or other network calls and holds no credentials. External integrations belong only in the orchestrator scripts that the workspace instructions authorize.
 - **§K1.3 (P1)** Read mailbox files only through a guarded reader that rejects symlinks and paths outside the data root, bounds file size and rejects non-finite JSON numbers; report a rejected file as a warning instead of failing the whole snapshot.
 - **§K1.4 (P2)** Unknown, missing or malformed source data stays visible as unknown or a warning. Do not infer completion, ownership, coverage or verification that the records do not state with evidence.
+- **§K1.5** (P2) In a projection, narrow every value read from a mailbox record to its expected type before it is hashed, compared, sorted or converted, and treat a value that fails the narrowing or the conversion as malformed, so that one record never raises out of the snapshot (K07).
 
 ## §K2. Dispatch gate and workspace scripts
 - **§K2.1 (P1)** `dispatch_gate.py` and the orchestrator scripts deny on unknown, unmet, cyclic or malformed prerequisites and on missing, stale, tampered or wrongly addressed receipts. There is no bypass flag.
